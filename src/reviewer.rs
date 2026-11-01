@@ -265,3 +265,44 @@ pub async fn run_pr_review(
 
     Ok(())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_review_markdown_fences() {
+        let raw_with_fences = r#"```json
+{
+  "summary": "Added a new greeting function",
+  "issues": [
+    {
+      "file": "src/main.rs",
+      "line": 42,
+      "severity": "bug",
+      "title": "Unwrap panic",
+      "comment": "This may unwrap on None",
+      "suggestion": "if let Some(x) = opt { ... }"
+    }
+  ]
+}
+```"#;
+
+        let output = parse_review_response(raw_with_fences).expect("Should parse markdown fences");
+        assert_eq!(output.summary, "Added a new greeting function");
+        assert_eq!(output.issues.len(), 1);
+        assert_eq!(output.issues[0].file, "src/main.rs");
+        assert_eq!(output.issues[0].line, 42);
+        assert_eq!(output.issues[0].severity, "bug");
+        assert!(output.issues[0].suggestion.is_some());
+    }
+
+    #[test]
+    fn test_parse_review_raw_json() {
+        let raw = r#"{"summary": "No changes", "issues": []}"#;
+        let output = parse_review_response(raw).expect("Should parse raw json");
+        assert_eq!(output.summary, "No changes");
+        assert!(output.issues.is_empty());
+    }
+}

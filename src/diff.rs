@@ -127,3 +127,50 @@ fn clean_diff_path(path: &str) -> String {
 fn clean_glob(pattern: &str) -> String {
     pattern.trim_start_matches('/').to_string()
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_DIFF: &str = r#"--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    println!("hello");
++    let x = 42;
++    println!("hello {}", x);
+ }
+--- a/flake.lock
++++ b/flake.lock
+@@ -1,2 +1,2 @@
+-{"nodes": {}}
++{"nodes": {"test": {}}}
+"#;
+
+    #[test]
+    fn test_parse_diff_and_valid_lines() {
+        let diff = ParsedDiff::parse(SAMPLE_DIFF).expect("Diff parsing should succeed");
+        assert_eq!(diff.files.len(), 2);
+
+        let main_file = &diff.files[0];
+        assert_eq!(main_file.new_path, "src/main.rs");
+        // Lines 2 and 3 are additions
+        assert!(diff.is_valid_line("src/main.rs", 2));
+        assert!(diff.is_valid_line("src/main.rs", 3));
+        // Line 99 does not exist
+        assert!(!diff.is_valid_line("src/main.rs", 99));
+    }
+
+    #[test]
+    fn test_apply_filters() {
+        let mut diff = ParsedDiff::parse(SAMPLE_DIFF).expect("Diff parsing should succeed");
+        assert_eq!(diff.files.len(), 2);
+
+        let filters = vec!["**/flake.lock".to_string()];
+        diff.apply_filters(&filters);
+
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].new_path, "src/main.rs");
+    }
+}

@@ -329,3 +329,46 @@ review:
 "#
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_native_revue_yaml() {
+        let yaml = RevueConfig::default_yaml_template();
+        let config: RevueConfig = serde_yaml::from_str(yaml).expect("Template should be valid YAML");
+        assert_eq!(config.version, 1);
+        assert_eq!(config.forge.url, "https://git.kleinbem.dev");
+        assert_eq!(config.providers.cascade.len(), 3);
+        assert_eq!(config.providers.cascade[0], "claude-cli");
+        assert!(config.review.ignore.contains(&"**/flake.lock".to_string()));
+    }
+
+    #[test]
+    fn test_legacy_coderabbit_conversion() {
+        let legacy_yaml = r#"
+language: en-GB
+tone_instructions: "Direct and crisp"
+reviews:
+  high_level_summary: true
+  path_filters:
+    - "!**/flake.lock"
+    - "!**/Cargo.lock"
+  path_instructions:
+    - path: "**/*.nix"
+      instructions: "No plaintext secrets"
+"#;
+        let tmp_path = std::env::temp_dir().join("test_coderabbit.yaml");
+        std::fs::write(&tmp_path, legacy_yaml).unwrap();
+
+        let config = RevueConfig::load_legacy_coderabbit(&tmp_path).expect("Legacy conversion should succeed");
+        let _ = std::fs::remove_file(tmp_path);
+        assert_eq!(config.review.language, "en-GB");
+        assert_eq!(config.review.tone, "Direct and crisp");
+        assert_eq!(config.review.ignore, vec!["**/flake.lock", "**/Cargo.lock"]);
+        assert_eq!(config.review.rules.len(), 1);
+        assert_eq!(config.review.rules[0].instructions, "No plaintext secrets");
+    }
+}
