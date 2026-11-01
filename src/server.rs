@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 
 #[derive(Clone)]
 struct ServerState {
-    config_path: String,
+    config_path: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -89,7 +89,7 @@ async fn handle_webhook(
 
     // Spawn review asynchronously in background so webhook returns 200 immediately
     tokio::spawn(async move {
-        if let Err(e) = run_pr_review(pr_index, Some(&repo_for_review), false, &config_path).await {
+        if let Err(e) = run_pr_review(pr_index, Some(&repo_for_review), false, config_path.as_deref()).await {
             error!("Failed to execute review for {} #{}: {:?}", repo_for_review, pr_index, e);
         }
     });
@@ -97,9 +97,9 @@ async fn handle_webhook(
     (StatusCode::ACCEPTED, format!("Review queued for {} #{}", repo, pr_index))
 }
 
-pub async fn run_daemon(listen: &str, config_path: &str) -> Result<()> {
+pub async fn run_daemon(listen: &str, config_path: Option<&str>) -> Result<()> {
     let state = Arc::new(ServerState {
-        config_path: config_path.to_string(),
+        config_path: config_path.map(|s| s.to_string()),
     });
 
     let app = Router::new()

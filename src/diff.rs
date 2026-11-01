@@ -86,7 +86,7 @@ impl ParsedDiff {
         Ok(Self { files })
     }
 
-    /// Filter files matching negative glob patterns (like `!**/flake.lock`)
+    /// Filter files matching ignore glob patterns (like `**/flake.lock`)
     pub fn apply_filters(&mut self, filters: &[String]) {
         if filters.is_empty() {
             return;
@@ -94,13 +94,12 @@ impl ParsedDiff {
 
         self.files.retain(|f| {
             for pattern in filters {
-                if let Some(clean_pattern) = pattern.strip_prefix('!') {
-                    let glob_pattern = clean_glob(clean_pattern);
-                    if let Ok(matcher) = glob::Pattern::new(&glob_pattern) {
-                        if matcher.matches(&f.new_path) {
-                            tracing::debug!("Ignoring filtered file: {}", f.new_path);
-                            return false;
-                        }
+                let clean_pattern = pattern.strip_prefix('!').unwrap_or(pattern);
+                let glob_pattern = clean_glob(clean_pattern);
+                if let Ok(matcher) = glob::Pattern::new(&glob_pattern) {
+                    if matcher.matches(&f.new_path) {
+                        tracing::debug!("Ignoring filtered file: {}", f.new_path);
+                        return false;
                     }
                 }
             }

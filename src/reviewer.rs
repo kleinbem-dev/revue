@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::RevueConfig;
 use crate::diff::ParsedDiff;
 use crate::forges::{forgejo::ForgejoClient, github::GitHubClient, Forge, InlineReviewComment};
 use crate::providers::{
@@ -32,10 +32,10 @@ fn default_severity() -> String {
     "warning".to_string()
 }
 
-pub fn build_provider_chain(config: &AppConfig) -> ProviderChain {
+pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
     let mut providers: Vec<Box<dyn Provider>> = Vec::new();
 
-    for name in &config.providers.order {
+    for name in &config.providers.cascade {
         match name.as_str() {
             "claude-cli" => {
                 providers.push(Box::new(ClaudeCliProvider::new()));
@@ -53,22 +53,19 @@ pub fn build_provider_chain(config: &AppConfig) -> ProviderChain {
                     config.providers.ollama_model.clone(),
                 )));
             }
-            _ => tracing::warn!("Unknown provider: {}", name),
+            _ => tracing::warn!("Unknown provider in cascade: {}", name),
         }
     }
 
     ProviderChain::new(providers)
 }
 
-pub fn generate_review_prompt(diff: &ParsedDiff, config: &AppConfig) -> String {
-    let tone = config
-        .tone_instructions
-        .as_deref()
-        .unwrap_or("Short and direct. Lead with the problem and the fix. No praise, no filler.");
+pub fn generate_review_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
+    let tone = &config.review.tone;
 
-    let mut path_instructions_text = String::new();
-    for pi in &config.reviews.path_instructions {
-        path_instructions_text.push_str(&format!("- For files matching `{}`: {}\n", pi.path, pi.instructions));
+    let mut rules_text = String::new();
+    for rule in &config.review.rules {
+        rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
     }
 
     let mut files_diff_text = String::new();
@@ -94,7 +91,7 @@ TONE INSTRUCTIONS:
 {tone}
 
 REPOSITORY-SPECIFIC RULES:
-{path_instructions_text}
+{rules_text}
 
 GENERAL GUIDELINES:
 1. Focus strictly on real bugs, security vulnerabilities, race conditions, edge cases, logic flaws, and breaking changes.
@@ -124,7 +121,6 @@ DIFF TO REVIEW:
 }
 
 pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
-    // Strip markdown code block fences if the LLM wrapped JSON in ```json ... ```
     let trimmed = raw.trim();
     let json_str = if let Some(stripped) = trimmed.strip_prefix("```json") {
         stripped.strip_suffix("```").unwrap_or(stripped).trim()
@@ -137,8 +133,8 @@ pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
     serde_json::from_str(json_str).with_context(|| format!("Failed to parse LLM JSON: {}", raw))
 }
 
-pub async fn run_diff_review(base: &str, format: &str, config_path: &str) -> Result<()> {
-    let config = AppConfig::load_or_default(config_path)?;
+pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>) -> Result<()> {
+    let config = RevueConfig::find_and_load(config_path)?;
     info!("Running local diff review against '{}'", base);
 
     let output = Command::new("git")
@@ -153,10 +149,10 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: &str) -> Res
     }
 
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
-    parsed.apply_filters(&config.reviews.path_filters);
+    parsed.apply_filters(&config.review.ignore);
 
     if parsed.files.is_empty() {
-        println!("All changed files were ignored by path filters.");
+        println!("All changed files were ignored by review.ignore rules.");
         return Ok(());
     }
 
@@ -169,7 +165,7 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: &str) -> Res
     if format == "json" {
         println!("{}", serde_json::to_string_pretty(&review)?);
     } else {
-        println!("\n## Code Review Summary (via {})\n", provider_name);
+        println!("\n## nix-revue Analysis (Provider: {})\n", provider_name);
         println!("{}\n", review.summary);
 
         if review.issues.is_empty() {
@@ -199,15 +195,18 @@ pub async fn run_pr_review(
     index: u64,
     repo_arg: Option<&str>,
     dry_run: bool,
-    config_path: &str,
+    config_path: Option<&str>,
 ) -> Result<()> {
-    let config = AppConfig::load_or_default(config_path)?;
+    let config = RevueConfig::find_and_load(config_path)?;
     let repo = repo_arg.ok_or_else(|| anyhow!("--repo is required for PR review"))?;
 
-    let forge: Box<dyn Forge> = if config.forgejo.token.is_some() {
+    let forge: Box<dyn Forge> = if config.forge.r#type == "forgejo"
+        || config.forge.url.contains("git.")
+        || config.forge.token.is_some()
+    {
         Box::new(ForgejoClient::new(
-            config.forgejo.url.clone(),
-            config.forgejo.token.clone(),
+            config.forge.url.clone(),
+            config.forge.token.clone(),
         )?)
     } else {
         Box::new(GitHubClient::new(None)?)
@@ -216,7 +215,7 @@ pub async fn run_pr_review(
     info!("Fetching PR #{} diff for {}", index, repo);
     let raw_diff = forge.fetch_pr_diff(repo, index).await?;
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
-    parsed.apply_filters(&config.reviews.path_filters);
+    parsed.apply_filters(&config.review.ignore);
 
     let prompt = generate_review_prompt(&parsed, &config);
     let chain = build_provider_chain(&config);

@@ -1,59 +1,50 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tracing::info;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AppConfig {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevueConfig {
+    #[serde(default = "default_version")]
+    pub version: u32,
     #[serde(default)]
-    pub language: Option<String>,
-    #[serde(default)]
-    pub tone_instructions: Option<String>,
-    #[serde(default)]
-    pub reviews: ReviewsConfig,
-    #[serde(default)]
-    pub forgejo: ForgejoConfig,
+    pub forge: ForgeConfig,
     #[serde(default)]
     pub providers: ProvidersConfig,
+    #[serde(default)]
+    pub review: ReviewSection,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ReviewsConfig {
-    #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default = "default_true")]
-    pub high_level_summary: bool,
-    #[serde(default)]
-    pub path_filters: Vec<String>,
-    #[serde(default)]
-    pub path_instructions: Vec<PathInstruction>,
-}
-
-fn default_true() -> bool {
-    true
+fn default_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PathInstruction {
-    pub path: String,
-    pub instructions: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForgejoConfig {
-    #[serde(default = "default_forgejo_url")]
+pub struct ForgeConfig {
+    /// Forge type: "forgejo", "gitea", "github", or "auto"
+    #[serde(default = "default_forge_type")]
+    pub r#type: String,
+    /// Base URL for the forge (e.g. https://git.kleinbem.dev)
+    #[serde(default = "default_forge_url")]
     pub url: String,
+    /// Access token (overridden by FORGEJO_TOKEN / GITHUB_TOKEN if empty)
     #[serde(default)]
     pub token: Option<String>,
 }
 
-fn default_forgejo_url() -> String {
+fn default_forge_type() -> String {
+    "auto".to_string()
+}
+
+fn default_forge_url() -> String {
     std::env::var("FORGEJO_URL").unwrap_or_else(|_| "https://git.kleinbem.dev".to_string())
 }
 
-impl Default for ForgejoConfig {
+impl Default for ForgeConfig {
     fn default() -> Self {
         Self {
-            url: default_forgejo_url(),
+            r#type: default_forge_type(),
+            url: default_forge_url(),
             token: std::env::var("FORGEJO_TOKEN").ok(),
         }
     }
@@ -61,8 +52,9 @@ impl Default for ForgejoConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersConfig {
-    #[serde(default = "default_fallback_order")]
-    pub order: Vec<String>,
+    /// Cascade failover order (e.g. ["claude-cli", "gemini", "ollama"])
+    #[serde(default = "default_cascade")]
+    pub cascade: Vec<String>,
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
     #[serde(default = "default_ollama_model")]
@@ -71,7 +63,7 @@ pub struct ProvidersConfig {
     pub gemini_model: String,
 }
 
-fn default_fallback_order() -> Vec<String> {
+fn default_cascade() -> Vec<String> {
     vec![
         "claude-cli".to_string(),
         "gemini".to_string(),
@@ -94,7 +86,7 @@ fn default_gemini_model() -> String {
 impl Default for ProvidersConfig {
     fn default() -> Self {
         Self {
-            order: default_fallback_order(),
+            cascade: default_cascade(),
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
             gemini_model: default_gemini_model(),
@@ -102,23 +94,238 @@ impl Default for ProvidersConfig {
     }
 }
 
-impl AppConfig {
-    /// Load config from `.coderabbit.yaml` or `.revue.yaml`, falling back to sensible defaults.
-    pub fn load_or_default<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let p = path.as_ref();
-        if p.exists() {
-            let content = std::fs::read_to_string(p)
-                .with_context(|| format!("Failed to read config from {:?}", p))?;
-            let mut cfg: AppConfig = serde_yaml::from_str(&content)
-                .with_context(|| format!("Failed to parse YAML from {:?}", p))?;
-            
-            // Enrich with env vars if not set in YAML
-            if cfg.forgejo.token.is_none() {
-                cfg.forgejo.token = std::env::var("FORGEJO_TOKEN").ok();
-            }
-            return Ok(cfg);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewSection {
+    #[serde(default = "default_tone")]
+    pub tone: String,
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default = "default_min_severity")]
+    pub min_severity: String,
+    #[serde(default = "default_true")]
+    pub summary: bool,
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    #[serde(default)]
+    pub rules: Vec<PathRule>,
+}
+
+fn default_tone() -> String {
+    "Short and direct. Lead with the problem and the fix. No praise, no filler.".to_string()
+}
+
+fn default_language() -> String {
+    "en-GB".to_string()
+}
+
+fn default_min_severity() -> String {
+    "warning".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathRule {
+    pub path: String,
+    pub instructions: String,
+}
+
+impl Default for ReviewSection {
+    fn default() -> Self {
+        Self {
+            tone: default_tone(),
+            language: default_language(),
+            min_severity: default_min_severity(),
+            summary: true,
+            ignore: vec![
+                "**/flake.lock".to_string(),
+                "**/Cargo.lock".to_string(),
+                "**/package-lock.json".to_string(),
+            ],
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl Default for RevueConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            forge: ForgeConfig::default(),
+            providers: ProvidersConfig::default(),
+            review: ReviewSection::default(),
+        }
+    }
+}
+
+impl RevueConfig {
+    /// Detect and load configuration from .revue.yaml, revue.yaml, or legacy .coderabbit.yaml
+    pub fn find_and_load(explicit_path: Option<&str>) -> Result<Self> {
+        if let Some(path) = explicit_path {
+            return Self::load_from_path(Path::new(path));
         }
 
+        let candidates = [
+            ".revue.yaml",
+            "revue.yaml",
+            ".revue.yml",
+            ".nix-revue.yaml",
+            ".coderabbit.yaml", // Legacy compatibility
+        ];
+
+        for c in &candidates {
+            let p = Path::new(c);
+            if p.exists() {
+                if *c == ".coderabbit.yaml" {
+                    info!("Detected legacy .coderabbit.yaml. Parsing with backward compatibility.");
+                    return Self::load_legacy_coderabbit(p);
+                }
+                info!("Loading config from {}", c);
+                return Self::load_from_path(p);
+            }
+        }
+
+        info!("No configuration file found. Using default fleet settings.");
         Ok(Self::default())
+    }
+
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config from {:?}", path))?;
+
+        let mut cfg: RevueConfig = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse YAML from {:?}", path))?;
+
+        if cfg.forge.token.is_none() {
+            cfg.forge.token = std::env::var("FORGEJO_TOKEN")
+                .or_else(|_| std::env::var("GITHUB_TOKEN"))
+                .ok();
+        }
+
+        Ok(cfg)
+    }
+
+    /// Convert legacy .coderabbit.yaml into native RevueConfig
+    fn load_legacy_coderabbit(path: &Path) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct LegacyConfig {
+            language: Option<String>,
+            tone_instructions: Option<String>,
+            reviews: Option<LegacyReviews>,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyReviews {
+            high_level_summary: Option<bool>,
+            path_filters: Option<Vec<String>>,
+            path_instructions: Option<Vec<LegacyPathInstruction>>,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyPathInstruction {
+            path: String,
+            instructions: String,
+        }
+
+        let content = std::fs::read_to_string(path)?;
+        let legacy: LegacyConfig = serde_yaml::from_str(&content)?;
+
+        let mut config = Self::default();
+
+        if let Some(lang) = legacy.language {
+            config.review.language = lang;
+        }
+        if let Some(tone) = legacy.tone_instructions {
+            config.review.tone = tone;
+        }
+        if let Some(reviews) = legacy.reviews {
+            if let Some(summary) = reviews.high_level_summary {
+                config.review.summary = summary;
+            }
+            if let Some(filters) = reviews.path_filters {
+                config.review.ignore = filters
+                    .into_iter()
+                    .map(|f| f.strip_prefix('!').unwrap_or(&f).to_string())
+                    .collect();
+            }
+            if let Some(instructions) = reviews.path_instructions {
+                config.review.rules = instructions
+                    .into_iter()
+                    .map(|i| PathRule {
+                        path: i.path,
+                        instructions: i.instructions,
+                    })
+                    .collect();
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Generate sample .revue.yaml content
+    pub fn default_yaml_template() -> &'static str {
+        r#"# nix-revue configuration
+# Schema version
+version: 1
+
+# Forge configuration
+forge:
+  # "forgejo", "gitea", "github", or "auto" (detected from git remote)
+  type: auto
+  # Base URL for Forgejo (used when forge is self-hosted)
+  url: "https://git.kleinbem.dev"
+
+# Multi-model provider cascade (primary -> fallback 1 -> fallback 2)
+providers:
+  cascade:
+    - claude-cli   # Non-interactive `claude -p` (uses your active subscription)
+    - gemini       # Google Gemini 2.0 Flash (free tier API)
+    - ollama       # Local offline GPU inference
+
+  ollama_url: "http://127.0.0.1:11434"
+  ollama_model: "qwen2.5-coder:14b"
+  gemini_model: "gemini-2.0-flash"
+
+# Review settings and inspection rules
+review:
+  language: en-GB
+  tone: "Short and direct. Lead with the problem and the fix. No praise, no filler."
+  
+  # Minimum severity level to post inline comments: info | warning | error | critical
+  min_severity: warning
+
+  # Glob patterns to ignore
+  ignore:
+    - "**/flake.lock"
+    - "**/Cargo.lock"
+    - "**/package-lock.json"
+    - "dist/**"
+    - "target/**"
+
+  # Path-specific rules and domain instructions
+  rules:
+    - path: "**"
+      instructions: |
+        Every workaround or fix for someone else's bug needs an upstream issue link.
+        Flag workarounds without one.
+
+    - path: "**/*.nix"
+      instructions: |
+        NixOS checks:
+        - Ensure sops secrets are gated by their feature enable option.
+        - Host /var is tmpfs: check for missing persistence entries.
+        - No plaintext secrets.
+
+    - path: "**/*.rs"
+      instructions: |
+        Check for unwrap() in production paths, missing error propagation,
+        and potential deadlocks.
+
+    - path: "**/*.sh"
+      instructions: |
+        Scripts run under `set -euo pipefail`: flag unbound variables and unquoted expansions.
+"#
     }
 }

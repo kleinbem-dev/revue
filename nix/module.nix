@@ -24,9 +24,9 @@ in
     };
 
     configFile = lib.mkOption {
-      type = lib.types.path;
-      default = "/etc/nix-revue/config.yaml";
-      description = "Path to the .coderabbit.yaml or configuration file.";
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Path to the .revue.yaml configuration file. If null, searches repository root or uses defaults.";
     };
 
     environmentFile = lib.mkOption {
@@ -43,7 +43,11 @@ in
       wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
-        ExecStart = "${lib.getExe cfg.package} --config ${cfg.configFile} daemon --listen ${cfg.listen}";
+        ExecStart =
+          let
+            configArg = lib.optionalString (cfg.configFile != null) "--config ${cfg.configFile}";
+          in
+          "${lib.getExe cfg.package} ${configArg} daemon --listen ${cfg.listen}";
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
         Restart = "always";
         RestartSec = "5s";

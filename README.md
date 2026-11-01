@@ -2,11 +2,11 @@
 
 > **Nix-native AI PR code review engine with subscription fallback and Forgejo support.**
 
-`nix-revue` is a self-hostable, forge-agnostic AI code review tool built in Rust. It was designed as an open-source alternative to CodeRabbit and hosted AI bots, built specifically to:
+`nix-revue` is a self-hostable, forge-agnostic AI code review tool built in Rust. It was designed as an open-source, subscription-friendly code reviewer built specifically to:
 
-1. **Re-use your active AI subscriptions** (`claude -p` CLI, Gemini AI Studio free tier) instead of metered SaaS tokens.
+1. **Re-use your active AI subscriptions** (`claude -p` CLI, Gemini AI Studio free tier) instead of paying per-token SaaS markups.
 2. **Support Forgejo and Gitea natively** alongside GitHub.
-3. **Drop-in support for `.coderabbit.yaml`** (path filters, tone instructions, and language-specific fleet rules).
+3. **Native `.revue.yaml` Configuration**: Intuitive syntax with rule targeting, path ignore patterns, and severity gating (with backward-compatible support for legacy `.coderabbit.yaml`).
 4. **Automatic Fallback Chain**: If your Claude CLI session hits rate limits, it automatically cascades to Gemini Flash, and then to local Ollama (`qwen2.5-coder` / `deepseek-r1`).
 5. **Nix-Native**: First-class Nix flake and NixOS module (`services.nix-revue`).
 
@@ -20,7 +20,7 @@
                     └────────────┬────────────┘
                                  │
                     ┌────────────▼────────────┐
-                    │ Filter .coderabbit.yaml │
+                    │  Filter .revue.yaml     │
                     └────────────┬────────────┘
                                  │
            ┌─────────────────────▼─────────────────────┐
@@ -49,6 +49,9 @@
 
 ### Run locally via Nix
 ```bash
+# Initialize a new .revue.yaml config
+nix run github:kleinbem-dev/nix-revue -- init
+
 # Review uncommitted changes against main
 nix run github:kleinbem-dev/nix-revue -- diff main
 
@@ -64,25 +67,68 @@ cargo build
 
 ---
 
-## Configuration (`.coderabbit.yaml`)
+## Native Configuration (`.revue.yaml`)
 
-`nix-revue` reads `.coderabbit.yaml` directly:
+Run `nix-revue init` to generate a `.revue.yaml`:
 
 ```yaml
-language: en-GB
-tone_instructions: "Short and direct. Lead with the problem and the fix. No praise, no filler."
+version: 1
 
-reviews:
-  high_level_summary: true
-  path_filters:
-    - "!**/flake.lock"
-    - "!**/Cargo.lock"
+# Forge configuration
+forge:
+  # "forgejo", "gitea", "github", or "auto" (detected from git remote)
+  type: auto
+  url: "https://git.kleinbem.dev"
 
-  path_instructions:
+# Multi-model provider cascade
+providers:
+  cascade:
+    - claude-cli   # Non-interactive `claude -p` (uses your active subscription)
+    - gemini       # Google Gemini 2.0 Flash (free tier API)
+    - ollama       # Local offline GPU inference
+
+  ollama_url: "http://127.0.0.1:11434"
+  ollama_model: "qwen2.5-coder:14b"
+  gemini_model: "gemini-2.0-flash"
+
+# Review settings and inspection rules
+review:
+  language: en-GB
+  tone: "Short and direct. Lead with the problem and the fix. No praise, no filler."
+  
+  # Minimum severity level to post inline comments: info | warning | error | critical
+  min_severity: warning
+
+  # Glob patterns to ignore
+  ignore:
+    - "**/flake.lock"
+    - "**/Cargo.lock"
+    - "**/package-lock.json"
+    - "dist/**"
+    - "target/**"
+
+  # Path-specific rules and domain instructions
+  rules:
+    - path: "**"
+      instructions: |
+        Every workaround or fix for someone else's bug needs an upstream issue link.
+        Flag workarounds without one.
+
     - path: "**/*.nix"
-      instructions: "Check that /var state has impermanence persistence entries and sops secrets are properly gated."
+      instructions: |
+        NixOS fleet checks:
+        - Ensure sops secrets are gated by their feature enable option.
+        - Host /var is tmpfs: check for missing persistence entries.
+        - No plaintext secrets.
+
+    - path: "**/*.rs"
+      instructions: |
+        Check for unwrap() in production paths, missing error propagation,
+        and potential deadlocks.
+
     - path: "**/*.sh"
-      instructions: "Scripts run under `set -euo pipefail`: flag unbound variables and unquoted expansions."
+      instructions: |
+        Scripts run under `set -euo pipefail`: flag unbound variables and unquoted expansions.
 ```
 
 ---
@@ -96,7 +142,6 @@ Add `nix-revue` to your NixOS configuration:
   services.nix-revue = {
     enable = true;
     listen = "127.0.0.1:8383";
-    configFile = "/etc/nix-revue/.coderabbit.yaml";
     environmentFile = "/run/secrets/revue.env"; # FORGEJO_TOKEN, GEMINI_API_KEY
   };
 }

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::Path;
 use tracing::info;
 
 pub mod config;
@@ -16,8 +17,9 @@ pub mod server;
     version
 )]
 struct Cli {
-    #[arg(short, long, global = true, default_value = ".coderabbit.yaml")]
-    config: String,
+    /// Explicit path to configuration file (defaults to .revue.yaml or revue.yaml)
+    #[arg(short, long, global = true)]
+    config: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -25,6 +27,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Initialize a new .revue.yaml configuration file in the current directory
+    Init {
+        /// Overwrite existing config file if present
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Review a local git / jj diff
     Diff {
         /// Base revision to compare against (e.g. main, HEAD~1)
@@ -68,17 +77,26 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    info!("Starting nix-revue");
 
     match cli.command {
+        Commands::Init { force } => {
+            let target = Path::new(".revue.yaml");
+            if target.exists() && !force {
+                eprintln!(".revue.yaml already exists. Use --force to overwrite.");
+                return Ok(());
+            }
+            std::fs::write(target, config::RevueConfig::default_yaml_template())?;
+            println!("Created .revue.yaml with default configuration.");
+        }
         Commands::Diff { base, format } => {
-            reviewer::run_diff_review(&base, &format, &cli.config).await?;
+            reviewer::run_diff_review(&base, &format, cli.config.as_deref()).await?;
         }
         Commands::Pr { index, repo, dry_run } => {
-            reviewer::run_pr_review(index, repo.as_deref(), dry_run, &cli.config).await?;
+            reviewer::run_pr_review(index, repo.as_deref(), dry_run, cli.config.as_deref()).await?;
         }
         Commands::Daemon { listen } => {
-            server::run_daemon(&listen, &cli.config).await?;
+            info!("Starting nix-revue daemon");
+            server::run_daemon(&listen, cli.config.as_deref()).await?;
         }
     }
 
