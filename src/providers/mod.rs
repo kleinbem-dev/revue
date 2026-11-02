@@ -2,13 +2,14 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tracing::{info, warn};
 
+pub mod antigravity;
 pub mod claude;
 pub mod gemini;
 pub mod ollama;
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Human-readable name of the provider (e.g. "Claude CLI", "Gemini 2.0 Flash", "Local Ollama")
+    /// Human-readable name of the provider
     fn name(&self) -> &str;
 
     /// Execute a review prompt and return the raw LLM text response
@@ -24,8 +25,7 @@ impl ProviderChain {
         Self { providers }
     }
 
-    /// Try providers in sequence. If one fails (e.g. rate limit, CLI timeout, out of quota),
-    /// automatically fall back to the next provider in the chain.
+    /// Try providers in sequence. If one fails, automatically fall back to the next provider in the chain.
     pub async fn complete_with_fallback(&self, prompt: &str) -> Result<(String, String)> {
         if self.providers.is_empty() {
             return Err(anyhow!("No LLM providers configured in fallback chain"));

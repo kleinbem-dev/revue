@@ -2,8 +2,8 @@ use crate::config::RevueConfig;
 use crate::diff::ParsedDiff;
 use crate::forges::{forgejo::ForgejoClient, github::GitHubClient, Forge, InlineReviewComment};
 use crate::providers::{
-    claude::ClaudeCliProvider, gemini::GeminiProvider, ollama::OllamaProvider, Provider,
-    ProviderChain,
+    antigravity::AntigravityCliProvider, claude::ClaudeCliProvider, gemini::GeminiProvider,
+    ollama::OllamaProvider, Provider, ProviderChain,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -37,14 +37,17 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
 
     for name in &config.providers.cascade {
         match name.as_str() {
-            "claude-cli" => {
+            "antigravity" | "gemini-cli" | "antigravity-cli" => {
+                providers.push(Box::new(AntigravityCliProvider::new()));
+            }
+            "claude" | "claude-cli" => {
                 providers.push(Box::new(ClaudeCliProvider::new()));
             }
-            "gemini" => {
+            "gemini" | "gemini-api" => {
                 if let Ok(gemini) = GeminiProvider::new(config.providers.gemini_model.clone()) {
                     providers.push(Box::new(gemini));
                 } else {
-                    tracing::warn!("Gemini provider skipped (GEMINI_API_KEY not set)");
+                    tracing::warn!("Gemini API skipped (no GEMINI_API_KEY / GOOGLE_API_KEY found)");
                 }
             }
             "ollama" => {

@@ -100,7 +100,7 @@ fn resolve_gemini_key() -> Option<String> {
 #[async_trait]
 impl Provider for GeminiProvider {
     fn name(&self) -> &str {
-        "Google Gemini (AI Studio)"
+        "Google Gemini (API Key)"
     }
 
     async fn complete(&self, prompt: &str) -> Result<String> {

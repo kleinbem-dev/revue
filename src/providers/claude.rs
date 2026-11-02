@@ -17,7 +17,7 @@ impl ClaudeCliProvider {
 #[async_trait]
 impl Provider for ClaudeCliProvider {
     fn name(&self) -> &str {
-        "Claude Code CLI (Subscription)"
+        "Claude Code (Subscription)"
     }
 
     async fn complete(&self, prompt: &str) -> Result<String> {

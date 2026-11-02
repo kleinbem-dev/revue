@@ -83,9 +83,10 @@ forge:
 # Multi-model provider cascade
 providers:
   cascade:
-    - claude-cli   # Non-interactive `claude -p` (uses your active subscription)
-    - gemini       # Google Gemini 2.0 Flash (free tier API)
-    - ollama       # Local offline GPU inference
+    - antigravity  # Google Gemini subscription via Antigravity CLI ($0 key, zero setup)
+    - gemini-api   # Google AI Studio free tier API (fallback)
+    - ollama       # Local offline GPU inference (fallback)
+    - claude       # Claude Code CLI (last resort)
 
   ollama_url: "http://127.0.0.1:11434"
   ollama_model: "qwen2.5-coder:14b"

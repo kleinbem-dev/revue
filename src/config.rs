@@ -65,9 +65,10 @@ pub struct ProvidersConfig {
 
 fn default_cascade() -> Vec<String> {
     vec![
-        "gemini".to_string(),
+        "antigravity".to_string(),
+        "gemini-api".to_string(),
         "ollama".to_string(),
-        "claude-cli".to_string(),
+        "claude".to_string(),
     ]
 }
 
@@ -280,9 +281,10 @@ forge:
 # Multi-model provider cascade (primary -> fallback 1 -> fallback 2)
 providers:
   cascade:
-    - gemini       # Google Gemini 2.0 Flash (Primary: fast, free tier / subscription)
-    - ollama       # Local offline GPU inference (Fallback)
-    - claude-cli   # Claude CLI (Last resort to conserve Claude quota)
+    - antigravity  # Google Gemini subscription via Antigravity CLI ($0 key, zero setup)
+    - gemini-api   # Google AI Studio REST API (fallback if key is set)
+    - ollama       # Local offline GPU inference (fallback)
+    - claude       # Claude Code CLI (last resort)
 
   ollama_url: "http://127.0.0.1:11434"
   ollama_model: "qwen2.5-coder:14b"
@@ -341,8 +343,8 @@ mod tests {
         let config: RevueConfig = serde_yaml::from_str(yaml).expect("Template should be valid YAML");
         assert_eq!(config.version, 1);
         assert_eq!(config.forge.url, "https://git.kleinbem.dev");
-        assert_eq!(config.providers.cascade.len(), 3);
-        assert_eq!(config.providers.cascade[0], "gemini");
+        assert_eq!(config.providers.cascade.len(), 4);
+        assert_eq!(config.providers.cascade[0], "antigravity");
         assert!(config.review.ignore.contains(&"**/flake.lock".to_string()));
     }
 
