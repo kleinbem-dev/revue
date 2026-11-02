@@ -133,18 +133,41 @@ pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
     serde_json::from_str(json_str).with_context(|| format!("Failed to parse LLM JSON: {}", raw))
 }
 
+fn fetch_local_diff(base: &str) -> Result<String> {
+    // 1. Try `git diff <base>`
+    if let Ok(output) = Command::new("git").args(["diff", base]).output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).to_string();
+            if !s.trim().is_empty() {
+                return Ok(s);
+            }
+        }
+    }
+
+    // 2. Try `jj diff --git -r <base>..@` (for Jujutsu colocated/added workspaces)
+    let jj_range = format!("{}..@", base);
+    if let Ok(output) = Command::new("jj")
+        .args(["diff", "--git", "-r", &jj_range])
+        .output()
+    {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).to_string();
+            if !s.trim().is_empty() {
+                return Ok(s);
+            }
+        }
+    }
+
+    Ok(String::new())
+}
+
 pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>) -> Result<()> {
     let config = RevueConfig::find_and_load(config_path)?;
     info!("Running local diff review against '{}'", base);
 
-    let output = Command::new("git")
-        .args(["diff", base])
-        .output()
-        .context("Failed to run `git diff`")?;
-
-    let raw_diff = String::from_utf8_lossy(&output.stdout);
+    let raw_diff = fetch_local_diff(base)?;
     if raw_diff.trim().is_empty() {
-        println!("No changes detected between working copy and '{}'.", base);
+        println!("No changes detected between working copy and '{}' (checked git and jj).", base);
         return Ok(());
     }
 
