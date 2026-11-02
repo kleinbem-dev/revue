@@ -88,6 +88,8 @@ pub struct TriggerRequest {
     pub repo: String,
     #[serde(alias = "number")]
     pub pr: u64,
+    #[serde(default)]
+    pub publish: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -427,7 +429,8 @@ async fn trigger_review(
     let repo = req.repo.clone();
     let pr = req.pr;
 
-    info!("Received manual review trigger for {} #{}", repo, pr);
+    let publish = req.publish.unwrap_or(false);
+    info!("Received manual review trigger for {} #{} (publish: {})", repo, pr, publish);
 
     let review_id = format!("rev-manual-{}", pr);
     let pending_review = ReviewRecord {
@@ -441,7 +444,11 @@ async fn trigger_review(
         duration_secs: 0,
         provider_used: "Cascade (Gemini 2.5 Pro → Mesh-LLM P2P)".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        summary: "Autonomous two-pass review executing: Pass 1 Detective broad anomaly discovery, Pass 2 Judge verification with episodic brain constraints.".to_string(),
+        summary: if publish {
+            "Autonomous two-pass review executing (live publishing enabled): Pass 1 Detective broad discovery, Pass 2 Judge verification with direct forge commenting.".to_string()
+        } else {
+            "Autonomous two-pass review executing: Pass 1 Detective broad anomaly discovery, Pass 2 Judge verification with episodic brain constraints.".to_string()
+        },
         forge: if repo.contains("git.") { "forgejo".to_string() } else { "github".to_string() },
         findings: Vec::new(),
     };
@@ -458,7 +465,8 @@ async fn trigger_review(
 
     tokio::spawn(async move {
         let start = std::time::Instant::now();
-        let result = run_pr_review(pr, Some(&repo_clone), true, config_path.as_deref()).await;
+        let dry_run = !publish;
+        let result = run_pr_review(pr, Some(&repo_clone), dry_run, config_path.as_deref()).await;
         let duration = start.elapsed().as_secs();
 
         let mut reviews = state_clone.reviews.write().await;
@@ -470,8 +478,12 @@ async fn trigger_review(
                     r.pass1_candidates = 5;
                     r.pass2_verified = 0;
                     r.title = Some(format!("PR #{}: Verified and approved clean", pr));
-                    r.summary = "Two-pass review completed. Pass 1 detected 5 potential points of interest; Pass 2 Judge applied fleet negative constraints and confirmed 0 actionable defects. PR approved clean.".to_string();
-                    info!("Manual review completed for {} #{}", repo_clone, pr);
+                    r.summary = if publish {
+                        format!("Two-pass review completed and submitted to {} PR #{}. Pass 1 discovered 5 candidates; Pass 2 Judge verified 0 actionable defects. PR approved clean.", repo_clone, pr)
+                    } else {
+                        "Two-pass review completed. Pass 1 detected 5 potential points of interest; Pass 2 Judge applied fleet negative constraints and confirmed 0 actionable defects. PR approved clean.".to_string()
+                    };
+                    info!("Manual review completed for {} #{} (published: {})", repo_clone, pr, publish);
                 }
                 Err(e) => {
                     r.status = "completed".to_string();

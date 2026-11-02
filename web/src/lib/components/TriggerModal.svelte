@@ -6,11 +6,12 @@
 	}: {
 		isOpen?: boolean;
 		onClose: () => void;
-		onTrigger: (repo: string, pr: number) => Promise<void>;
+		onTrigger: (repo: string, pr: number, publish: boolean) => Promise<void>;
 	} = $props();
 
 	let repo = $state('kleinbem/nix-config');
 	let pr = $state<number | ''>(516);
+	let publish = $state(false);
 	let isSubmitting = $state(false);
 	let error = $state<string | null>(null);
 
@@ -36,7 +37,7 @@
 		isSubmitting = true;
 		error = null;
 		try {
-			await onTrigger(repo.trim(), Number(pr));
+			await onTrigger(repo.trim(), Number(pr), publish);
 			onClose();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to trigger review';
@@ -118,6 +119,16 @@
 						min="1"
 						required
 					/>
+				</div>
+
+				<div class="publish-box">
+					<label class="publish-label">
+						<input type="checkbox" bind:checked={publish} class="publish-checkbox" />
+						<div class="publish-text">
+							<span class="publish-title">Post Review Directly to Forge</span>
+							<span class="publish-subtitle">Submit verified findings & line diff suggestions to GitHub / Forgejo PR</span>
+						</div>
+					</label>
 				</div>
 
 				<div class="pipeline-preview">
@@ -311,6 +322,53 @@
 	input:focus {
 		border-color: #58a6ff;
 		box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+	}
+
+	.publish-box {
+		background: rgba(31, 111, 235, 0.08);
+		border: 1px solid rgba(56, 139, 253, 0.3);
+		border-radius: 0.5rem;
+		padding: 0.75rem 0.9rem;
+		transition: all 0.2s ease;
+	}
+
+	.publish-box:hover {
+		background: rgba(31, 111, 235, 0.12);
+		border-color: rgba(56, 139, 253, 0.5);
+	}
+
+	.publish-label {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.75rem;
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.publish-checkbox {
+		margin-top: 0.2rem;
+		width: 1.05rem;
+		height: 1.05rem;
+		accent-color: #388bfd;
+		cursor: pointer;
+	}
+
+	.publish-text {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+
+	.publish-title {
+		font-size: 0.85rem;
+		font-weight: 600;
+		color: #e6edf3;
+	}
+
+	.publish-subtitle {
+		font-size: 0.72rem;
+		color: #8b949e;
+		line-height: 1.3;
 	}
 
 	.pipeline-preview {

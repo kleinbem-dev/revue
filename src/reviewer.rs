@@ -442,7 +442,7 @@ pub async fn run_pr_review(
     }
 
     let summary = format!(
-        "## nix-revue Analysis (Provider: {})\n\n{}\n\n*Reviewed {} files, flagged {} items.*",
+        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}\n\n---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** Pass 1 (Detective) → Pass 2 (Judge)\n- **Engine:** Revue v0.1.0\n</details>",
         provider_name,
         review.summary,
         parsed.files.len(),

@@ -273,11 +273,11 @@
 		}
 	}
 
-	async function triggerManualReview(repo: string, pr: number) {
+	async function triggerManualReview(repo: string, pr: number, publish: boolean = false) {
 		const res = await fetch('/api/trigger', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ repo, pr, number: pr })
+			body: JSON.stringify({ repo, pr, number: pr, publish })
 		});
 		if (!res.ok) {
 			const text = await res.text();

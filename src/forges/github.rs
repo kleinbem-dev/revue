@@ -28,7 +28,7 @@ impl GitHubClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static("nix-revue/0.1.0"),
+            HeaderValue::from_static("revue/0.1.0"),
         );
 
         let resolved_token = token.or_else(|| std::env::var("GITHUB_TOKEN").ok());
@@ -106,10 +106,54 @@ impl Forge for GitHubClient {
             .map_err(|e| anyhow!("Failed to post review to GitHub: {}", e))?;
 
         if !res.status().is_success() {
+            let status = res.status();
+            let err_text = res.text().await.unwrap_or_default();
+
+            // If GitHub rejects with 422 (frequently due to comments outside diff range),
+            // gracefully fallback to posting the review without inline comments, appending them to the body.
+            if status.as_u16() == 422 && !comments.is_empty() {
+                tracing::warn!(
+                    "GitHub rejected inline comments with 422 on PR #{}: {}. Retrying with consolidated review body...",
+                    pr_index,
+                    err_text
+                );
+
+                let mut fallback_body = summary.to_string();
+                fallback_body.push_str("\n\n### 📝 Inline Findings (Consolidated)\n\n");
+                for c in comments {
+                    fallback_body.push_str(&format!("- **`{}:{}`**\n{}\n\n", c.path, c.line, c.body));
+                }
+
+                let fallback_req = CreateReviewRequest {
+                    body: &fallback_body,
+                    event: "COMMENT",
+                    comments: vec![],
+                };
+
+                let fallback_res = self
+                    .client
+                    .post(&url)
+                    .json(&fallback_req)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow!("Failed to post fallback review to GitHub: {}", e))?;
+
+                if !fallback_res.status().is_success() {
+                    return Err(anyhow!(
+                        "GitHub review creation fallback also failed (status {}): {}",
+                        fallback_res.status(),
+                        fallback_res.text().await.unwrap_or_default()
+                    ));
+                }
+
+                info!("Successfully submitted fallback review to GitHub PR #{}", pr_index);
+                return Ok(());
+            }
+
             return Err(anyhow!(
                 "GitHub review creation failed (status {}): {}",
-                res.status(),
-                res.text().await.unwrap_or_default()
+                status,
+                err_text
             ));
         }
 

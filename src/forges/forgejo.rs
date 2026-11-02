@@ -1,7 +1,7 @@
 use super::{Forge, InlineReviewComment};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Serialize;
 use tracing::info;
 
@@ -27,6 +27,10 @@ struct ForgejoReviewComment<'a> {
 impl ForgejoClient {
     pub fn new(base_url: String, token: Option<String>) -> Result<Self> {
         let mut headers = HeaderMap::new();
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static("revue/0.1.0"),
+        );
         if let Some(t) = token {
             headers.insert(
                 AUTHORIZATION,
@@ -104,10 +108,52 @@ impl Forge for ForgejoClient {
             .map_err(|e| anyhow!("Failed to post review to {}: {}", url, e))?;
 
         if !res.status().is_success() {
+            let status = res.status();
+            let err_text = res.text().await.unwrap_or_default();
+
+            if (status.as_u16() == 422 || status.as_u16() == 400) && !comments.is_empty() {
+                tracing::warn!(
+                    "Forgejo rejected inline comments (status {}): {}. Retrying with consolidated review body...",
+                    status,
+                    err_text
+                );
+
+                let mut fallback_body = summary.to_string();
+                fallback_body.push_str("\n\n### 📝 Inline Findings (Consolidated)\n\n");
+                for c in comments {
+                    fallback_body.push_str(&format!("- **`{}:{}`**\n{}\n\n", c.path, c.line, c.body));
+                }
+
+                let fallback_req = CreateReviewRequest {
+                    body: &fallback_body,
+                    event: "COMMENT",
+                    comments: vec![],
+                };
+
+                let fallback_res = self
+                    .client
+                    .post(&url)
+                    .json(&fallback_req)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow!("Failed to post fallback review to Forgejo: {}", e))?;
+
+                if !fallback_res.status().is_success() {
+                    return Err(anyhow!(
+                        "Forgejo review creation fallback also failed (status {}): {}",
+                        fallback_res.status(),
+                        fallback_res.text().await.unwrap_or_default()
+                    ));
+                }
+
+                info!("Successfully submitted fallback review to Forgejo PR #{}", pr_index);
+                return Ok(());
+            }
+
             return Err(anyhow!(
                 "Forgejo review creation failed (status {}): {}",
-                res.status(),
-                res.text().await.unwrap_or_default()
+                status,
+                err_text
             ));
         }
 
