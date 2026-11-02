@@ -125,10 +125,10 @@
 	let searchQuery = $state('');
 
 	const filteredReviews = $derived(
-		reviews.filter(
+		(reviews ?? []).filter(
 			(r) =>
-				r.repo.toLowerCase().includes(searchQuery.toLowerCase()) ||
-				String(r.pr_number).includes(searchQuery)
+				(r?.repo ?? '').toLowerCase().includes((searchQuery ?? '').toLowerCase()) ||
+				String(r?.pr_number ?? '').includes(searchQuery ?? '')
 		)
 	);
 
@@ -137,11 +137,30 @@
 			const res = await fetch('/api/status');
 			if (res.ok) {
 				const data = await res.json();
-				if (data.metrics) metrics = data.metrics;
-				if (data.providers) providers = data.providers;
+				if (data?.metrics) {
+					metrics = {
+						total_reviews: Number(data.metrics.total_reviews ?? 0),
+						pass1_candidates: Number(data.metrics.pass1_candidates ?? 0),
+						pass2_filtered: Number(data.metrics.pass2_filtered ?? 0),
+						verified_findings: Number(data.metrics.verified_findings ?? 0),
+						avg_cost_saved: String(data.metrics.avg_cost_saved ?? '$0.00'),
+						uptime: String(data.metrics.uptime ?? '99.9%')
+					};
+				}
+				if (Array.isArray(data?.providers)) {
+					providers = data.providers.map((p: any) => ({
+						id: String(p.id ?? p.name?.toLowerCase().replace(/\s+/g, '-') ?? 'unknown'),
+						name: String(p.name ?? 'AI Provider'),
+						type: String(p.type ?? 'api'),
+						model: String(p.model ?? 'unknown'),
+						status: String(p.status ?? 'ready'),
+						cost_per_token: String(p.cost_per_token ?? '$0.00'),
+						latency_avg: String(p.latency_avg ?? 'N/A')
+					}));
+				}
 			}
-		} catch {
-			// Backend offline in dev, keep initial data
+		} catch (err) {
+			console.warn('Backend status fetch failed:', err);
 		}
 	}
 
@@ -150,10 +169,37 @@
 			const res = await fetch('/api/reviews');
 			if (res.ok) {
 				const data = await res.json();
-				if (Array.isArray(data)) reviews = data;
+				if (Array.isArray(data)) {
+					reviews = data.map((r: any) => ({
+						id: String(r.id ?? ''),
+						repo: String(r.repo ?? 'unknown/repo'),
+						pr_number: Number(r.pr_number ?? 0),
+						title: r.title ? String(r.title) : undefined,
+						author: r.author ? String(r.author) : 'system',
+						forge: (r.forge ?? 'github') as 'github' | 'forgejo' | 'gitea',
+						created_at: String(r.created_at ?? 'Recently'),
+						duration_secs: Number(r.duration_secs ?? 0),
+						provider_used: String(r.provider_used ?? 'Unknown'),
+						findings_count: Array.isArray(r.findings) ? r.findings.length : 0,
+						pass1_candidates: Number(r.pass1_candidates ?? 0),
+						pass2_verified: Number(r.pass2_verified ?? 0),
+						summary: String(r.summary ?? ''),
+						findings: Array.isArray(r.findings)
+							? r.findings.map((f: any) => ({
+									file: String(f.file ?? ''),
+									line: Number(f.line ?? 0),
+									severity: f.severity ?? 'info',
+									title: String(f.title ?? ''),
+									body: String(f.body ?? ''),
+									confidence: f.confidence !== undefined ? Number(f.confidence) : undefined,
+									snippet: f.snippet ? String(f.snippet) : undefined
+								}))
+							: []
+					}));
+				}
 			}
-		} catch {
-			// Backend offline in dev, keep initial data
+		} catch (err) {
+			console.warn('Backend reviews fetch failed:', err);
 		}
 	}
 
@@ -297,10 +343,10 @@
 										</span>
 									</td>
 									<td>
-										{#if review.findings.length === 0}
+										{#if (review.findings ?? []).length === 0}
 											<span class="badge clean">Clean ✨</span>
 										{:else}
-											<span class="badge issues">{review.findings.length} flagged</span>
+											<span class="badge issues">{(review.findings ?? []).length} flagged</span>
 										{/if}
 									</td>
 									<td>

@@ -11,10 +11,12 @@
 
 	let filter = $state<'all' | 'critical' | 'error' | 'warning'>('all');
 
+	const findingsList = $derived(review?.findings ?? []);
+
 	const filteredFindings = $derived(
 		filter === 'all'
-			? review.findings
-			: review.findings.filter((f) => f.severity === filter)
+			? findingsList
+			: findingsList.filter((f) => f && f.severity === filter)
 	);
 </script>
 
@@ -76,7 +78,7 @@
 							class:active={filter === 'all'}
 							onclick={() => (filter = 'all')}
 						>
-							All ({review.findings.length})
+							All ({findingsList.length})
 						</button>
 						<button
 							class="pill error"

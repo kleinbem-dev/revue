@@ -3,9 +3,10 @@ use crate::reviewer::run_pr_review;
 use anyhow::Result;
 use axum::{
     body::Bytes,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Json},
+    extract::{Request, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -497,6 +498,26 @@ fn seed_initial_reviews() -> Vec<ReviewRecord> {
     ]
 }
 
+async fn add_cache_headers(req: Request, next: Next) -> Response {
+    let uri = req.uri().path().to_string();
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+    if uri.starts_with("/_app/immutable/") {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    } else {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        );
+        headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
+    }
+    res
+}
+
 pub async fn run_daemon(
     listen: &str,
     config_path: Option<&str>,
@@ -595,6 +616,7 @@ pub async fn run_daemon(
         Router::new()
             .merge(api_router)
             .fallback_service(serve_service)
+            .layer(middleware::from_fn(add_cache_headers))
     } else {
         info!("No static dashboard directory found; serving API and status landing page");
         Router::new()
@@ -607,6 +629,7 @@ pub async fn run_daemon(
                     )
                 }),
             )
+            .layer(middleware::from_fn(add_cache_headers))
     };
 
     info!("revue daemon listening on http://{}", listen);
