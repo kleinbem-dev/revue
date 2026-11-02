@@ -161,7 +161,7 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 					{filterRatePercent}% Pruned
 				</div>
 				<div class="hero-sub">
-					{review.pass1_candidates} candidates $\rightarrow$ {review.pass2_verified} verified ({filterPrunedCount} false positives pruned)
+					{review.pass1_candidates} candidates → {review.pass2_verified} verified ({filterPrunedCount} false positives pruned)
 				</div>
 			</div>
 		</div>

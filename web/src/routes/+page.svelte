@@ -351,7 +351,7 @@
 				<div class="section-header">
 					<div>
 						<h2>Multi-Provider Cascade Status</h2>
-						<span class="sub">Failover priority: Primary $\rightarrow$ Fallback 1 $\rightarrow$ Fallback 2</span>
+						<span class="sub">Failover priority: Primary → Fallback 1 → Fallback 2</span>
 					</div>
 				</div>
 
@@ -542,7 +542,7 @@
 											<td>{review.provider_used}</td>
 											<td>
 												<span class="filter-stat">
-													{review.pass1_candidates} detected $\rightarrow$ {review.pass2_verified} judge-approved
+													{review.pass1_candidates} detected → {review.pass2_verified} judge-approved
 												</span>
 											</td>
 											<td>
@@ -622,7 +622,7 @@
 	}
 
 	.content {
-		max-width: 1200px;
+		max-width: 1440px;
 		width: 100%;
 		margin: 0 auto;
 		padding: 2rem;
@@ -717,8 +717,14 @@
 
 	.providers-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
 		gap: 1.15rem;
+	}
+
+	@media (min-width: 1100px) {
+		.providers-grid {
+			grid-template-columns: repeat(5, 1fr);
+		}
 	}
 
 	.header-actions {

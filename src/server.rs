@@ -573,6 +573,21 @@ fn seed_initial_reviews() -> Vec<ReviewRecord> {
                 },
             ],
         },
+        ReviewRecord {
+            id: "rev-516".to_string(),
+            repo: "kleinbem/nix-config".to_string(),
+            pr_number: 516,
+            title: Some("feat(containers): register revue standalone container on container-factory".to_string()),
+            status: "completed".to_string(),
+            pass1_candidates: 2,
+            pass2_verified: 0,
+            duration_secs: 11,
+            provider_used: "Gemini 2.5 Flash".to_string(),
+            created_at: "2026-11-02 16:58:22 UTC".to_string(),
+            summary: "Analyzed container factory registration and pre-warm configuration across 2 files. Pass 1 surfaced 2 potential lint candidates. Pass 2 Judge verified clean NixOS module imports and zero regressions. Auto-approved.".to_string(),
+            forge: "github".to_string(),
+            findings: Vec::new(),
+        },
     ]
 }
 
