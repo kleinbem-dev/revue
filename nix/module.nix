@@ -85,6 +85,7 @@ in
               DynamicUser = false;
               ProtectSystem = "strict";
               ProtectHome = "read-only";
+              ReadWritePaths = [ "/home/${cfg.user}/.gemini" ];
               NoNewPrivileges = true;
               PrivateTmp = true;
               Environment = [
