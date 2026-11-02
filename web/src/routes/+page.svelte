@@ -277,7 +277,7 @@
 		const res = await fetch('/api/trigger', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ repo, number: pr })
+			body: JSON.stringify({ repo, pr, number: pr })
 		});
 		if (!res.ok) {
 			const text = await res.text();
@@ -487,7 +487,11 @@
 											onkeydown={(e) => { if (e.key === 'Enter') selectedReview = review; }}
 										>
 											<div class="card-top-row">
-												<span class="badge clean">✔ Approved Clean</span>
+												{#if review.status === 'running'}
+													<span class="badge running">⏳ Analyzing (Pass 1 & 2)...</span>
+												{:else}
+													<span class="badge clean">✔ Approved Clean</span>
+												{/if}
 												<span class="forge-pill {review.forge}">{review.forge}</span>
 												<span class="diff-chip">+{review.lines_added ?? 6} −{review.lines_removed ?? 6}</span>
 											</div>
@@ -587,6 +591,7 @@
 
 	{#if isTriggerOpen}
 		<TriggerModal
+			isOpen={isTriggerOpen}
 			onClose={() => (isTriggerOpen = false)}
 			onTrigger={triggerManualReview}
 		/>
@@ -1075,6 +1080,18 @@
 	.badge.clean {
 		background: rgba(16, 185, 129, 0.15);
 		color: #34d399;
+	}
+
+	.badge.running {
+		background: rgba(217, 119, 6, 0.15);
+		color: #fbbf24;
+		border: 1px solid rgba(245, 158, 11, 0.3);
+		animation: badgePulse 1.5s ease-in-out infinite;
+	}
+
+	@keyframes badgePulse {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.7; transform: scale(0.98); }
 	}
 
 	.badge.issues {

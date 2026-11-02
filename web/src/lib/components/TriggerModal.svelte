@@ -1,18 +1,30 @@
 <script lang="ts">
 	let {
-		isOpen,
+		isOpen = true,
 		onClose,
 		onTrigger
 	}: {
-		isOpen: boolean;
+		isOpen?: boolean;
 		onClose: () => void;
 		onTrigger: (repo: string, pr: number) => Promise<void>;
 	} = $props();
 
-	let repo = $state('');
-	let pr = $state<number | ''>('');
+	let repo = $state('kleinbem/nix-config');
+	let pr = $state<number | ''>(516);
 	let isSubmitting = $state(false);
 	let error = $state<string | null>(null);
+
+	const presets = [
+		{ repo: 'kleinbem/nix-config', pr: 516, desc: 'feat: containerize revue service' },
+		{ repo: 'kleinbem/nix-config', pr: 505, desc: 'feat: enable forgejo & revue daemon' },
+		{ repo: 'kleinbem/revue', pr: 1, desc: 'feat: add Brain & Skills directory' }
+	];
+
+	function selectPreset(presetRepo: string, presetPr: number) {
+		repo = presetRepo;
+		pr = presetPr;
+		error = null;
+	}
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
@@ -51,19 +63,39 @@
 			tabindex="-1"
 		>
 			<div class="modal-header">
-				<h3>Trigger On-Demand Review</h3>
+				<div class="header-left">
+					<span class="header-icon">🚀</span>
+					<h3>Trigger On-Demand Review</h3>
+				</div>
 				<button class="close-btn" onclick={onClose} aria-label="Close">✕</button>
 			</div>
 
 			<form onsubmit={handleSubmit} class="modal-body">
 				<p class="desc">
-					Manually trigger the 2-pass review pipeline (Pass 1 Detective + Pass 2 Judge) on any
-					Pull Request on GitHub or Forgejo.
+					Manually trigger the 2-pass review pipeline (<strong>Pass 1 Detective</strong> + <strong>Pass 2 Judge</strong>) on any pull request. Episodic brain constraints and fleet skills will be injected automatically.
 				</p>
 
 				{#if error}
 					<div class="error-banner">{error}</div>
 				{/if}
+
+				<!-- Preset Quick Chips -->
+				<div class="preset-section">
+					<span class="preset-label">Quick Presets:</span>
+					<div class="preset-chips">
+						{#each presets as preset}
+							<button
+								type="button"
+								class="chip-btn"
+								class:selected={repo === preset.repo && pr === preset.pr}
+								onclick={() => selectPreset(preset.repo, preset.pr)}
+							>
+								<span class="chip-pr">#{preset.pr}</span>
+								<span class="chip-repo">{preset.repo.replace('kleinbem/', '')}</span>
+							</button>
+						{/each}
+					</div>
+				</div>
 
 				<div class="field">
 					<label for="repo-input">Repository</label>
@@ -82,16 +114,28 @@
 						id="pr-input"
 						type="number"
 						bind:value={pr}
-						placeholder="e.g. 42"
+						placeholder="e.g. 516"
 						min="1"
 						required
 					/>
 				</div>
 
+				<div class="pipeline-preview">
+					<span class="pipeline-label">Execution Strategy:</span>
+					<div class="pipeline-badge">
+						<span class="dot live"></span>
+						<span>Gemini 2.5 Pro → Mesh-LLM P2P GPU (Fallback)</span>
+					</div>
+				</div>
+
 				<div class="modal-actions">
 					<button type="button" class="btn btn-secondary" onclick={onClose}>Cancel</button>
 					<button type="submit" class="btn btn-primary" disabled={isSubmitting}>
-						{isSubmitting ? 'Queueing Review...' : 'Start Review 🚀'}
+						{#if isSubmitting}
+							<span class="spinner"></span> Starting Review...
+						{:else}
+							<span>Execute Review 🚀</span>
+						{/if}
 					</button>
 				</div>
 			</form>
@@ -103,23 +147,23 @@
 	.overlay {
 		position: fixed;
 		inset: 0;
-		background: rgba(0, 0, 0, 0.7);
-		backdrop-filter: blur(6px);
+		background: rgba(0, 0, 0, 0.75);
+		backdrop-filter: blur(8px);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		z-index: 100;
+		z-index: 1000;
 		padding: 1rem;
 	}
 
 	.modal {
-		background: #0f172a;
-		border: 1px solid #1e293b;
+		background: #11151c;
+		border: 1px solid rgba(255, 255, 255, 0.12);
 		border-radius: 0.85rem;
-		max-width: 480px;
+		max-width: 500px;
 		width: 100%;
 		overflow: hidden;
-		box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+		box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
 	}
 
 	.modal-header {
@@ -127,29 +171,41 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 1.15rem 1.5rem;
-		border-bottom: 1px solid #1e293b;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+		background: #161c26;
+	}
+
+	.header-left {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+	}
+
+	.header-icon {
+		font-size: 1.25rem;
 	}
 
 	h3 {
 		font-size: 1.05rem;
 		font-weight: 600;
-		color: #f8fafc;
+		color: #f0f6fc;
 		margin: 0;
 	}
 
 	.close-btn {
 		background: none;
 		border: none;
-		color: #64748b;
+		color: #8b949e;
 		font-size: 1.1rem;
 		cursor: pointer;
-		padding: 0.25rem;
+		padding: 0.25rem 0.5rem;
 		border-radius: 0.25rem;
+		transition: all 0.15s ease;
 	}
 
 	.close-btn:hover {
-		color: #f1f5f9;
-		background: #1e293b;
+		color: #f0f6fc;
+		background: rgba(255, 255, 255, 0.08);
 	}
 
 	.modal-body {
@@ -161,18 +217,72 @@
 
 	.desc {
 		font-size: 0.85rem;
-		color: #94a3b8;
+		color: #8b949e;
 		margin: 0;
 		line-height: 1.5;
 	}
 
+	.desc strong {
+		color: #f0f6fc;
+	}
+
 	.error-banner {
-		background: rgba(239, 68, 68, 0.15);
-		border: 1px solid rgba(239, 68, 68, 0.3);
-		color: #f87171;
+		background: rgba(248, 81, 73, 0.15);
+		border: 1px solid rgba(248, 81, 73, 0.3);
+		color: #ff7b72;
 		font-size: 0.825rem;
 		padding: 0.65rem 0.85rem;
 		border-radius: 0.45rem;
+	}
+
+	.preset-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+	}
+
+	.preset-label {
+		font-size: 0.75rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: #8b949e;
+	}
+
+	.preset-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem;
+	}
+
+	.chip-btn {
+		background: #1c2331;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 0.45rem;
+		padding: 0.35rem 0.65rem;
+		color: #c9d1d9;
+		font-size: 0.775rem;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		transition: all 0.15s ease;
+	}
+
+	.chip-btn:hover {
+		background: #252f42;
+		border-color: rgba(255, 255, 255, 0.2);
+		color: #f0f6fc;
+	}
+
+	.chip-btn.selected {
+		background: rgba(88, 166, 255, 0.15);
+		border-color: #58a6ff;
+		color: #58a6ff;
+	}
+
+	.chip-pr {
+		font-weight: 700;
 	}
 
 	.field {
@@ -184,23 +294,54 @@
 	label {
 		font-size: 0.8rem;
 		font-weight: 500;
-		color: #cbd5e1;
+		color: #c9d1d9;
 	}
 
 	input {
-		background: #020617;
-		border: 1px solid #334155;
+		background: #090d13;
+		border: 1px solid rgba(255, 255, 255, 0.15);
 		border-radius: 0.45rem;
-		padding: 0.55rem 0.85rem;
+		padding: 0.6rem 0.85rem;
 		font-size: 0.875rem;
-		color: #f8fafc;
+		color: #f0f6fc;
 		outline: none;
 		transition: border-color 0.15s ease;
 	}
 
 	input:focus {
-		border-color: #8b5cf6;
-		box-shadow: 0 0 0 1px #8b5cf6;
+		border-color: #58a6ff;
+		box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+	}
+
+	.pipeline-preview {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		background: #161c26;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 0.45rem;
+		padding: 0.65rem 0.85rem;
+		font-size: 0.775rem;
+	}
+
+	.pipeline-label {
+		color: #8b949e;
+	}
+
+	.pipeline-badge {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		color: #f0f6fc;
+		font-weight: 500;
+	}
+
+	.dot.live {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: #3fb950;
+		box-shadow: 0 0 6px #3fb950;
 	}
 
 	.modal-actions {
@@ -212,37 +353,55 @@
 	}
 
 	.btn {
-		padding: 0.55rem 1.15rem;
+		padding: 0.6rem 1.25rem;
 		border-radius: 0.45rem;
 		font-size: 0.85rem;
 		font-weight: 500;
 		cursor: pointer;
 		transition: all 0.15s ease;
 		border: 1px solid transparent;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
 	}
 
 	.btn-secondary {
-		background: #1e293b;
-		border-color: #334155;
-		color: #cbd5e1;
+		background: #1c2331;
+		border-color: rgba(255, 255, 255, 0.12);
+		color: #c9d1d9;
 	}
 
 	.btn-secondary:hover {
-		background: #334155;
-		color: #f8fafc;
+		background: #252f42;
+		color: #f0f6fc;
 	}
 
 	.btn-primary {
-		background: #8b5cf6;
+		background: #238636;
 		color: white;
 	}
 
 	.btn-primary:hover:not(:disabled) {
-		background: #7c3aed;
+		background: #2ea043;
 	}
 
 	.btn-primary:disabled {
 		opacity: 0.6;
 		cursor: not-allowed;
+	}
+
+	.spinner {
+		width: 14px;
+		height: 14px;
+		border: 2px solid rgba(255, 255, 255, 0.3);
+		border-top-color: white;
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
 	}
 </style>
