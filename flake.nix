@@ -42,7 +42,21 @@
         };
       });
 
-      nixosModules.default = import ./nix/module.nix;
+      overlays.default = final: prev: {
+        nix-revue = self.packages.${prev.system}.default;
+      };
+
+      nixosModules.default =
+        {
+          config,
+          lib,
+          pkgs,
+          ...
+        }:
+        {
+          imports = [ ./nix/module.nix ];
+          nixpkgs.overlays = [ self.overlays.default ];
+        };
       nixosModules.nix-revue = self.nixosModules.default;
     };
 }
