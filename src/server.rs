@@ -99,6 +99,11 @@ pub struct FeedbackRequest {
     pub reason: Option<String>,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct DeleteFeedbackRequest {
+    pub id: i64,
+}
+
 #[derive(Clone)]
 struct ServerState {
     config_path: Option<String>,
@@ -353,6 +358,56 @@ async fn record_finding_feedback(
             "message": format!("Feedback '{}' recorded for {}", req.feedback_type, req.issue_title)
         })),
     )
+}
+
+async fn get_all_feedback(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    if let Some(db) = &state.db {
+        match db.list_all_feedback(100).await {
+            Ok(feedback) => Json(serde_json::json!({
+                "status": "success",
+                "feedback": feedback
+            })),
+            Err(e) => {
+                error!("Failed to query feedback: {:?}", e);
+                Json(serde_json::json!({
+                    "status": "error",
+                    "feedback": []
+                }))
+            }
+        }
+    } else {
+        Json(serde_json::json!({
+            "status": "success",
+            "feedback": []
+        }))
+    }
+}
+
+async fn delete_feedback_entry(
+    State(state): State<Arc<ServerState>>,
+    Json(req): Json<DeleteFeedbackRequest>,
+) -> impl IntoResponse {
+    if let Some(db) = &state.db {
+        match db.delete_feedback(req.id).await {
+            Ok(true) => (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "success", "message": "Feedback deleted" })),
+            ),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "status": "not_found", "message": "Feedback ID not found" })),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": e.to_string() })),
+            ),
+        }
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "success", "message": "No persistent db configured" })),
+        )
+    }
 }
 
 async fn get_available_skills() -> impl IntoResponse {
@@ -664,7 +719,8 @@ pub async fn run_daemon(
         .route("/api/status", get(get_status))
         .route("/api/reviews", get(get_reviews))
         .route("/api/trigger", post(trigger_review))
-        .route("/api/feedback", post(record_finding_feedback))
+        .route("/api/feedback", get(get_all_feedback).post(record_finding_feedback))
+        .route("/api/feedback/delete", post(delete_feedback_entry))
         .route("/api/skills", get(get_available_skills))
         .layer(cors)
         .with_state(state.clone());

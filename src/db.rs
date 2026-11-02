@@ -491,6 +491,86 @@ impl DbPool {
             }
         }
     }
+
+    pub async fn list_all_feedback(&self, limit: i64) -> Result<Vec<FindingFeedback>> {
+        match self {
+            DbPool::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+                    FROM findings_feedback
+                    ORDER BY id DESC
+                    LIMIT ?
+                    "#
+                )
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+
+                let feedback = rows
+                    .into_iter()
+                    .map(|r| FindingFeedback {
+                        id: r.get(0),
+                        repo: r.get(1),
+                        file_path: r.get(2),
+                        issue_title: r.get(3),
+                        feedback_type: r.get(4),
+                        reason: r.get(5),
+                        created_at: r.get(6),
+                    })
+                    .collect();
+
+                Ok(feedback)
+            }
+            DbPool::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+                    FROM findings_feedback
+                    ORDER BY id DESC
+                    LIMIT $1
+                    "#
+                )
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+
+                let feedback = rows
+                    .into_iter()
+                    .map(|r| FindingFeedback {
+                        id: r.get(0),
+                        repo: r.get(1),
+                        file_path: r.get(2),
+                        issue_title: r.get(3),
+                        feedback_type: r.get(4),
+                        reason: r.get(5),
+                        created_at: r.get(6),
+                    })
+                    .collect();
+
+                Ok(feedback)
+            }
+        }
+    }
+
+    pub async fn delete_feedback(&self, id: i64) -> Result<bool> {
+        match self {
+            DbPool::Sqlite(pool) => {
+                let res = sqlx::query("DELETE FROM findings_feedback WHERE id = ?")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(res.rows_affected() > 0)
+            }
+            DbPool::Postgres(pool) => {
+                let res = sqlx::query("DELETE FROM findings_feedback WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                Ok(res.rows_affected() > 0)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

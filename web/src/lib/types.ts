@@ -65,3 +65,19 @@ export interface WizardConfig {
 	ignore_generated: boolean;
 	custom_guidelines: string;
 }
+
+export interface SkillSummary {
+	name: string;
+	description: string;
+	triggers: string[];
+}
+
+export interface FeedbackRecord {
+	id: number;
+	repo: string;
+	file_path: string;
+	issue_title: string;
+	feedback_type: string;
+	reason?: string;
+	created_at: string;
+}

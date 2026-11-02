@@ -4,11 +4,12 @@
 	import ReviewDetail from '#lib/components/ReviewDetail.svelte';
 	import TriggerModal from '#lib/components/TriggerModal.svelte';
 	import ConfigWizard from '#lib/components/ConfigWizard.svelte';
+	import BrainView from '#lib/components/BrainView.svelte';
 	import type { DaemonMetrics, ProviderStatus, ReviewRecord } from '#lib';
 	import { onMount } from 'svelte';
 
 	// Svelte 5 reactive state runes
-	let activeNavTab = $state<'dashboard' | 'wizard'>('dashboard');
+	let activeNavTab = $state<'dashboard' | 'wizard' | 'brain'>('dashboard');
 	let layoutMode = $state<'kanban' | 'table'>('kanban');
 
 	let providers = $state<ProviderStatus[]>([
@@ -311,6 +312,9 @@
 		{#if activeNavTab === 'wizard'}
 			<!-- CodeRabbit-Grade Setup & Rules Wizard -->
 			<ConfigWizard />
+		{:else if activeNavTab === 'brain'}
+			<!-- Revue Brain & Fleet Skills Registry -->
+			<BrainView />
 		{:else}
 			<!-- Metrics Overview (CodeRabbit-inspired KPI Row) -->
 			<section class="metrics-grid">

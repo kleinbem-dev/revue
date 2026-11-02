@@ -5,8 +5,8 @@
 		onTabChange
 	}: {
 		version?: string;
-		activeTab?: 'dashboard' | 'wizard';
-		onTabChange?: (tab: 'dashboard' | 'wizard') => void;
+		activeTab?: 'dashboard' | 'wizard' | 'brain';
+		onTabChange?: (tab: 'dashboard' | 'wizard' | 'brain') => void;
 	} = $props();
 </script>
 
@@ -38,6 +38,15 @@
 		>
 			<span class="tab-icon">🥕</span>
 			<span>Rules & Config Wizard</span>
+		</button>
+
+		<button
+			class="nav-tab"
+			class:active={activeTab === 'brain'}
+			onclick={() => onTabChange?.('brain')}
+		>
+			<span class="tab-icon">🧠</span>
+			<span>Brain & Skills</span>
 		</button>
 	</nav>
 
