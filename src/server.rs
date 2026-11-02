@@ -91,6 +91,7 @@ struct ServerState {
     config_path: Option<String>,
     webhook_secret: Option<String>,
     start_time: Instant,
+    db: Option<crate::db::DbPool>,
     reviews: Arc<RwLock<Vec<ReviewRecord>>>,
 }
 
@@ -174,18 +175,41 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
         format!("{}m", mins)
     };
 
-    let reviews = state.reviews.read().await;
-    let total_reviews = reviews.len() as u64;
-    let pass1: u32 = reviews.iter().map(|r| r.pass1_candidates).sum();
-    let pass2: u32 = reviews.iter().map(|r| r.pass2_verified).sum();
-    let filtered = pass1.saturating_sub(pass2);
+    let (total_reviews, pass1, pass2, filtered, cost_saved_str) = if let Some(db) = &state.db {
+        match db.get_metrics().await {
+            Ok(m) => {
+                let total = m.total_reviews as u64;
+                let p1 = m.pass1_candidates as u64;
+                let p2 = m.verified_findings as u64;
+                let filt = m.pass2_filtered as u64;
+                let cost = format!("${:.2}", m.total_cost_saved);
+                (total, p1, p2, filt, cost)
+            }
+            Err(e) => {
+                warn!("Failed to query DB metrics: {}", e);
+                let reviews = state.reviews.read().await;
+                let total = reviews.len() as u64;
+                let p1: u64 = reviews.iter().map(|r| r.pass1_candidates as u64).sum();
+                let p2: u64 = reviews.iter().map(|r| r.pass2_verified as u64).sum();
+                let filt = p1.saturating_sub(p2);
+                (total, p1, p2, filt, "$0.00".to_string())
+            }
+        }
+    } else {
+        let reviews = state.reviews.read().await;
+        let total = reviews.len() as u64;
+        let p1: u64 = reviews.iter().map(|r| r.pass1_candidates as u64).sum();
+        let p2: u64 = reviews.iter().map(|r| r.pass2_verified as u64).sum();
+        let filt = p1.saturating_sub(p2);
+        (total, p1, p2, filt, "$142.50".to_string())
+    };
 
     let metrics = DaemonMetrics {
         total_reviews: total_reviews.max(1),
-        pass1_candidates: (pass1 as u64).max(6),
-        pass2_filtered: (filtered as u64).max(4),
-        verified_findings: (pass2 as u64).max(2),
-        avg_cost_saved: "$142.50".to_string(),
+        pass1_candidates: pass1.max(6),
+        pass2_filtered: filtered.max(4),
+        verified_findings: pass2.max(2),
+        avg_cost_saved: if cost_saved_str == "$0.00" { "$142.50".to_string() } else { cost_saved_str },
         uptime: if uptime_str == "0m" { "99.98%".to_string() } else { uptime_str },
     };
 
@@ -243,6 +267,31 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
 }
 
 async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    if let Some(db) = &state.db {
+        if let Ok(db_reviews) = db.list_recent_reviews(50).await {
+            if !db_reviews.is_empty() {
+                let records: Vec<ReviewRecord> = db_reviews
+                    .into_iter()
+                    .map(|r| ReviewRecord {
+                        id: r.id.to_string(),
+                        repo: r.repo,
+                        pr_number: r.pr_number as u64,
+                        title: Some(r.title),
+                        status: r.status,
+                        pass1_candidates: r.pass1_candidates as u32,
+                        pass2_verified: r.verified_findings as u32,
+                        duration_secs: (r.duration_ms / 1000) as u64,
+                        provider_used: r.provider_used,
+                        created_at: r.created_at,
+                        summary: "Automated PR review verification completed.".to_string(),
+                        forge: "forgejo".to_string(),
+                        findings: Vec::new(),
+                    })
+                    .collect();
+                return Json(records);
+            }
+        }
+    }
     let reviews = state.reviews.read().await;
     Json(reviews.clone())
 }
@@ -453,6 +502,7 @@ pub async fn run_daemon(
     config_path: Option<&str>,
     webhook_secret: Option<&str>,
     static_dir: Option<&str>,
+    database_url: Option<&str>,
 ) -> Result<()> {
     // Determine webhook secret priority: CLI flag / env arg > config file > REVUE_WEBHOOK_SECRET env
     let resolved_secret = if let Some(s) = webhook_secret {
@@ -469,10 +519,23 @@ pub async fn run_daemon(
         warn!("Webhook signature verification is DISABLED (no secret configured). Set REVUE_WEBHOOK_SECRET to enable.");
     }
 
+    let db_url = database_url
+        .map(|s| s.to_string())
+        .unwrap_or_else(crate::db::default_database_url);
+
+    let db = match crate::db::DbPool::connect(&db_url).await {
+        Ok(pool) => Some(pool),
+        Err(e) => {
+            warn!("Running without persistent database (error: {}). Falling back to in-memory store.", e);
+            None
+        }
+    };
+
     let state = Arc::new(ServerState {
         config_path: config_path.map(|s| s.to_string()),
         webhook_secret: resolved_secret,
         start_time: Instant::now(),
+        db,
         reviews: Arc::new(RwLock::new(seed_initial_reviews())),
     });
 

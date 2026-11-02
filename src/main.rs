@@ -4,10 +4,12 @@ use std::path::Path;
 use tracing::info;
 
 pub mod config;
+pub mod db;
 pub mod diff;
 pub mod forges;
 pub mod providers;
 pub mod reviewer;
+pub mod scrubber;
 pub mod server;
 
 #[derive(Parser, Debug)]
@@ -72,6 +74,10 @@ enum Commands {
         /// Directory containing static web dashboard assets (defaults to ./web/build)
         #[arg(long, env = "REVUE_STATIC_DIR")]
         static_dir: Option<String>,
+
+        /// Database URL (sqlite:///path/to/revue.db or postgres://user:pass@host:5432/revue)
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: Option<String>,
     },
 }
 
@@ -106,6 +112,7 @@ async fn main() -> Result<()> {
             listen,
             webhook_secret,
             static_dir,
+            database_url,
         } => {
             info!("Starting revue daemon");
             server::run_daemon(
@@ -113,6 +120,7 @@ async fn main() -> Result<()> {
                 cli.config.as_deref(),
                 webhook_secret.as_deref(),
                 static_dir.as_deref(),
+                database_url.as_deref(),
             )
             .await?;
         }

@@ -92,7 +92,9 @@ fn format_diff_and_context(diff: &ParsedDiff) -> String {
         }
         out.push('\n');
     }
-    out
+
+    // DLP Guard: Scrub private keys, cloud tokens, and sensitive credentials
+    crate::scrubber::scrub_diff(&out).0
 }
 
 pub fn generate_pass1_detective_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
