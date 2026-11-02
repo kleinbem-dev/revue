@@ -28,20 +28,20 @@ export interface ReviewRecord {
 }
 
 export interface ProviderStatus {
-	id: string;
+	id?: string;
 	name: string;
-	type: 'subscription' | 'api' | 'local_gpu';
+	type: string;
 	model: string;
-	status: 'active' | 'ready' | 'fallback' | 'unconfigured';
+	status: string;
 	cost_per_token: string;
 	latency_avg: string;
 }
 
 export interface DaemonMetrics {
-	uptime_secs: number;
 	total_reviews: number;
-	estimated_savings_usd: number;
-	active_provider: string;
-	pass1_total_candidates: number;
-	pass2_total_filtered: number;
+	pass1_candidates: number;
+	pass2_filtered: number;
+	verified_findings: number;
+	avg_cost_saved: string;
+	uptime: string;
 }

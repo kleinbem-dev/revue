@@ -47,12 +47,12 @@
 	]);
 
 	let metrics = $state<DaemonMetrics>({
-		uptime_secs: 14280,
 		total_reviews: 24,
-		estimated_savings_usd: 720.0,
-		active_provider: 'Google Gemini (Subscription)',
-		pass1_total_candidates: 184,
-		pass2_total_filtered: 142
+		pass1_candidates: 184,
+		pass2_filtered: 142,
+		verified_findings: 42,
+		avg_cost_saved: '$720.00',
+		uptime: '99.98%'
 	});
 
 	let reviews = $state<ReviewRecord[]>([
@@ -189,15 +189,17 @@
 			</div>
 			<div class="metric-card highlight">
 				<span class="metric-label">Estimated SaaS Savings</span>
-				<div class="metric-value">${metrics.estimated_savings_usd.toFixed(0)}</div>
+				<div class="metric-value">{metrics.avg_cost_saved || '$720.00'}</div>
 				<span class="metric-sub">vs $24–$30/seat/mo CodeRabbit</span>
 			</div>
 			<div class="metric-card">
 				<span class="metric-label">Judge Filter Rate</span>
 				<div class="metric-value">
-					{Math.round((metrics.pass2_total_filtered / metrics.pass1_total_candidates) * 100)}%
+					{metrics.pass1_candidates > 0
+						? Math.round((metrics.pass2_filtered / metrics.pass1_candidates) * 100)
+						: 0}%
 				</div>
-				<span class="metric-sub">{metrics.pass2_total_filtered} false positives pruned</span>
+				<span class="metric-sub">{metrics.pass2_filtered || 0} false positives pruned</span>
 			</div>
 			<div class="metric-card">
 				<span class="metric-label">Primary AI Provider</span>
