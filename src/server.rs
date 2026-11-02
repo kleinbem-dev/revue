@@ -378,7 +378,7 @@ async fn handle_webhook(
         payload
             .number
             .or_else(|| payload.pull_request.as_ref().and_then(|pr| pr.number))
-    } else if event == "issue_comment" {
+    } else if event == "issue_comment" || event == "pull_request_review_comment" {
         if action != "created" {
             return (
                 StatusCode::OK,
@@ -387,12 +387,14 @@ async fn handle_webhook(
         }
 
         // Only handle comments on pull requests
-        let is_pr = payload.issue.as_ref().and_then(|i| i.pull_request.as_ref()).is_some();
-        if !is_pr {
-            return (
-                StatusCode::OK,
-                "Ignored comment on regular issue (not a pull request)".to_string(),
-            );
+        if event == "issue_comment" {
+            let is_pr = payload.issue.as_ref().and_then(|i| i.pull_request.as_ref()).is_some();
+            if !is_pr {
+                return (
+                    StatusCode::OK,
+                    "Ignored comment on regular issue (not a pull request)".to_string(),
+                );
+            }
         }
 
         let body = payload.comment.as_ref().and_then(|c| c.body.as_deref()).unwrap_or("");
@@ -403,11 +405,17 @@ async fn handle_webhook(
             );
         }
 
-        payload.issue.as_ref().and_then(|i| i.number)
+        payload
+            .number
+            .or_else(|| payload.pull_request.as_ref().and_then(|pr| pr.number))
+            .or_else(|| payload.issue.as_ref().and_then(|i| i.number))
     } else {
         return (
             StatusCode::OK,
-            format!("Ignored event '{}' (only pull_request and issue_comment are handled)", event),
+            format!(
+                "Ignored event '{}' (only pull_request, issue_comment, and pull_request_review_comment are handled)",
+                event
+            ),
         );
     };
 
@@ -714,5 +722,23 @@ mod tests {
     fn test_missing_header_rejected() {
         let headers = HeaderMap::new();
         assert!(!verify_signature("secret", &headers, b"payload"));
+    }
+
+    #[test]
+    fn test_webhook_payload_pr_review_comment() {
+        let json_data = r#"{
+            "action": "created",
+            "comment": { "body": "@revue please re-evaluate this suggestion" },
+            "pull_request": { "number": 42 },
+            "repository": { "full_name": "kleinbem/nix-config" }
+        }"#;
+        let payload: WebhookPayload = serde_json::from_str(json_data).unwrap();
+        assert_eq!(payload.action.as_deref(), Some("created"));
+        assert_eq!(payload.pull_request.unwrap().number, Some(42));
+        assert!(payload.comment.unwrap().body.unwrap().contains("@revue"));
+        assert_eq!(
+            payload.repository.unwrap().full_name.as_deref(),
+            Some("kleinbem/nix-config")
+        );
     }
 }
