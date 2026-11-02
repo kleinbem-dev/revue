@@ -65,9 +65,9 @@ pub struct ProvidersConfig {
 
 fn default_cascade() -> Vec<String> {
     vec![
-        "claude-cli".to_string(),
         "gemini".to_string(),
         "ollama".to_string(),
+        "claude-cli".to_string(),
     ]
 }
 
@@ -280,9 +280,9 @@ forge:
 # Multi-model provider cascade (primary -> fallback 1 -> fallback 2)
 providers:
   cascade:
-    - claude-cli   # Non-interactive `claude -p` (uses your active subscription)
-    - gemini       # Google Gemini 2.0 Flash (free tier API)
-    - ollama       # Local offline GPU inference
+    - gemini       # Google Gemini 2.0 Flash (Primary: fast, free tier / subscription)
+    - ollama       # Local offline GPU inference (Fallback)
+    - claude-cli   # Claude CLI (Last resort to conserve Claude quota)
 
   ollama_url: "http://127.0.0.1:11434"
   ollama_model: "qwen2.5-coder:14b"
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(config.version, 1);
         assert_eq!(config.forge.url, "https://git.kleinbem.dev");
         assert_eq!(config.providers.cascade.len(), 3);
-        assert_eq!(config.providers.cascade[0], "claude-cli");
+        assert_eq!(config.providers.cascade[0], "gemini");
         assert!(config.review.ignore.contains(&"**/flake.lock".to_string()));
     }
 

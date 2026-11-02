@@ -2,6 +2,7 @@ use super::Provider;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub struct GeminiProvider {
     api_key: String,
@@ -52,14 +53,48 @@ struct GeminiError {
 
 impl GeminiProvider {
     pub fn new(model: String) -> Result<Self> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .map_err(|_| anyhow!("GEMINI_API_KEY environment variable not set"))?;
+        let api_key = resolve_gemini_key()
+            .ok_or_else(|| anyhow!("Neither GEMINI_API_KEY nor GOOGLE_API_KEY found in environment or ~/.config/gemini/api_key"))?;
+
         Ok(Self {
             api_key,
             model,
             client: reqwest::Client::new(),
         })
     }
+}
+
+fn resolve_gemini_key() -> Option<String> {
+    // 1. Env vars
+    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        if !key.trim().is_empty() {
+            return Some(key.trim().to_string());
+        }
+    }
+    if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+        if !key.trim().is_empty() {
+            return Some(key.trim().to_string());
+        }
+    }
+
+    // 2. File fallback: ~/.config/gemini/api_key or ~/.config/google/api_key
+    if let Ok(home) = std::env::var("HOME") {
+        let paths = [
+            PathBuf::from(&home).join(".config/gemini/api_key"),
+            PathBuf::from(&home).join(".config/google/api_key"),
+            PathBuf::from(&home).join(".gemini/api_key"),
+        ];
+        for path in &paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[async_trait]
