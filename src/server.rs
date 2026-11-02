@@ -484,16 +484,23 @@ pub async fn run_daemon(
 
     // Resolve static files directory for SvelteKit web dashboard:
     // 1. Explicit CLI argument / env var
-    // 2. ./web/build
-    // 3. /var/lib/revue/web
+    // 2. ./web/build (local development)
+    // 3. ../share/revue/web relative to executable (Nix store / standard install)
+    // 4. /var/lib/revue/web (system directory)
     let resolved_static_dir = if let Some(dir) = static_dir {
         let p = PathBuf::from(dir);
         if p.exists() { Some(p) } else { None }
     } else {
         let candidate_rel = PathBuf::from("./web/build");
+        let candidate_share = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|bin| bin.join("../share/revue/web")));
         let candidate_var = PathBuf::from("/var/lib/revue/web");
+
         if candidate_rel.exists() {
             Some(candidate_rel)
+        } else if let Some(share) = candidate_share.filter(|p| p.exists()) {
+            Some(share)
         } else if candidate_var.exists() {
             Some(candidate_var)
         } else {

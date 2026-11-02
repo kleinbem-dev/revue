@@ -17,26 +17,44 @@
       forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      packages = forAllSystems (pkgs: {
-        default = pkgs.rustPlatform.buildRustPackage {
-          pname = "revue";
-          version = "0.1.0";
-          src = ./.;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
+      packages = forAllSystems (
+        pkgs:
+        let
+          web = pkgs.buildNpmPackage {
+            pname = "revue-web";
+            version = "0.1.0";
+            src = ./web;
+            npmDepsHash = "sha256-+mXKx++AnWxSKZjboLheqO1qGq+TFFKVSy3hPuk6PHk=";
+            installPhase = ''
+              mkdir -p $out
+              cp -r build/* $out/
+            '';
           };
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          postInstall = ''
-            ln -s $out/bin/revue $out/bin/nix-revue
-          '';
-          meta = with lib; {
-            description = "Self-hosted, forge-agnostic AI code review engine";
-            homepage = "https://github.com/kleinbem-dev/revue";
-            license = with licenses; [ mit asl20 ];
-            mainProgram = "revue";
+        in
+        {
+          inherit web;
+          default = pkgs.rustPlatform.buildRustPackage {
+            pname = "revue";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+            };
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            postInstall = ''
+              ln -s $out/bin/revue $out/bin/nix-revue
+              mkdir -p $out/share/revue/web
+              cp -r ${web}/* $out/share/revue/web/
+            '';
+            meta = with lib; {
+              description = "Self-hosted, forge-agnostic AI code review engine";
+              homepage = "https://github.com/kleinbem-dev/revue";
+              license = with licenses; [ mit asl20 ];
+              mainProgram = "revue";
+            };
           };
-        };
-      });
+        }
+      );
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
