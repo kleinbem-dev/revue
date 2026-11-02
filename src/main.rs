@@ -68,6 +68,10 @@ enum Commands {
         /// Webhook HMAC secret for signature verification (or set REVUE_WEBHOOK_SECRET)
         #[arg(long, env = "REVUE_WEBHOOK_SECRET")]
         webhook_secret: Option<String>,
+
+        /// Directory containing static web dashboard assets (defaults to ./web/build)
+        #[arg(long, env = "REVUE_STATIC_DIR")]
+        static_dir: Option<String>,
     },
 }
 
@@ -98,9 +102,19 @@ async fn main() -> Result<()> {
         Commands::Pr { index, repo, dry_run } => {
             reviewer::run_pr_review(index, repo.as_deref(), dry_run, cli.config.as_deref()).await?;
         }
-        Commands::Daemon { listen, webhook_secret } => {
+        Commands::Daemon {
+            listen,
+            webhook_secret,
+            static_dir,
+        } => {
             info!("Starting revue daemon");
-            server::run_daemon(&listen, cli.config.as_deref(), webhook_secret.as_deref()).await?;
+            server::run_daemon(
+                &listen,
+                cli.config.as_deref(),
+                webhook_secret.as_deref(),
+                static_dir.as_deref(),
+            )
+            .await?;
         }
     }
 

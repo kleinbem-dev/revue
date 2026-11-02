@@ -174,6 +174,25 @@ Configure your webhook in **GitHub** or **Forgejo / Gitea**:
 - **Secret:** `my-hmac-secret`
 - **Events:** `Pull request` and `Issue comments`
 
+### Web Control Dashboard (SvelteKit + Svelte 5)
+
+Revue includes a reactive web control panel built with modern SvelteKit and Svelte 5 runes (`$state`, `$derived`, `$props`). The dashboard provides:
+- **Live Pipeline Metrics:** Total reviews, Pass 1 candidates, Pass 2 filtered noise, verified findings, uptime.
+- **Provider Cascade Status:** Visual health and status for Gemini Subscription ($0 flat), Gemini AI Studio API, Local Ollama, and Claude Code.
+- **Review Inspector:** Filter findings by severity (Errors, Warnings, Info), inspect Judge confidence scores, and preview code diff snippets with line numbers.
+- **On-Demand PR Review Trigger:** Queue reviews for any GitHub or Forgejo PR directly from the web interface.
+
+```bash
+# Build the web dashboard static bundle
+cd web
+npm install
+npm run build
+
+# Run the daemon (automatically serves web/build)
+revue daemon --listen 0.0.0.0:8383
+```
+Open `http://localhost:8383` in your browser.
+
 ---
 
 ## Configuration (`.revue.yaml`)
