@@ -7,6 +7,7 @@ pub mod claude;
 pub mod gemini;
 pub mod mesh_llm;
 pub mod ollama;
+pub mod openai_compat;
 
 #[async_trait]
 pub trait Provider: Send + Sync {

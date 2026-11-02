@@ -296,6 +296,17 @@ fn fetch_local_diff(base: &str) -> Result<String> {
     Ok(String::new())
 }
 
+/// Execute two-pass review directly on a raw diff string. Used by CLI and MCP server.
+pub async fn review_diff_content(
+    raw_diff: &str,
+    config_path: Option<&str>,
+) -> Result<(ReviewOutput, String)> {
+    let config = RevueConfig::find_and_load(config_path)?;
+    let parsed = crate::diff::ParsedDiff::parse(raw_diff)?;
+    let chain = build_provider_chain(&config);
+    execute_review_pipeline(&parsed, &config, &chain).await
+}
+
 pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>) -> Result<()> {
     let config = RevueConfig::find_and_load(config_path)?;
     info!("Running local diff review against '{}'", base);

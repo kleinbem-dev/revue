@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod diff;
 pub mod forges;
+pub mod mcp;
 pub mod providers;
 pub mod reviewer;
 pub mod scrubber;
@@ -79,6 +80,9 @@ enum Commands {
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
     },
+
+    /// Run as an MCP (Model Context Protocol) stdio server for AI coding agents
+    Mcp,
 }
 
 #[tokio::main]
@@ -123,6 +127,9 @@ async fn main() -> Result<()> {
                 database_url.as_deref(),
             )
             .await?;
+        }
+        Commands::Mcp => {
+            mcp::run_mcp_server(cli.config.as_deref()).await?;
         }
     }
 
