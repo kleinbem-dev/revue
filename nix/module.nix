@@ -6,17 +6,17 @@
 }:
 
 let
-  cfg = config.services.nix-revue;
-in
-{
-  options.services.nix-revue = {
-    enable = lib.mkEnableOption "nix-revue AI PR code review daemon";
+  cfg = if config.services.revue.enable then config.services.revue else config.services.nix-revue;
+  enabled = config.services.revue.enable || config.services.nix-revue.enable;
+
+  revueModuleOptions = {
+    enable = lib.mkEnableOption "revue AI PR code review daemon";
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.nix-revue;
-      defaultText = lib.literalExpression "pkgs.nix-revue";
-      description = "The nix-revue package to run.";
+      default = pkgs.revue;
+      defaultText = lib.literalExpression "pkgs.revue";
+      description = "The revue package to run.";
     };
 
     user = lib.mkOption {
@@ -49,10 +49,14 @@ in
       description = "Path to an EnvironmentFile containing secrets (FORGEJO_TOKEN, GEMINI_API_KEY, GITHUB_TOKEN, REVUE_WEBHOOK_SECRET).";
     };
   };
+in
+{
+  options.services.revue = revueModuleOptions;
+  options.services.nix-revue = revueModuleOptions;
 
-  config = lib.mkIf cfg.enable {
-    systemd.services.nix-revue = {
-      description = "nix-revue AI PR code review webhook daemon";
+  config = lib.mkIf enabled {
+    systemd.services.revue = {
+      description = "revue AI PR code review webhook daemon";
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
 

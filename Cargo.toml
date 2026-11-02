@@ -1,11 +1,18 @@
 [package]
-name = "nix-revue"
+name = "revue"
 version = "0.1.0"
 edition = "2021"
 authors = ["Martin <martin@kleinbem.dev>"]
-description = "Nix-native, forge-agnostic AI code review engine with subscription fallback (Claude, Gemini, Ollama)"
+description = "Self-hosted, forge-agnostic AI code review engine with multi-provider cascade (Gemini, Claude, Ollama)"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/kleinbem-dev/nix-revue"
+repository = "https://github.com/kleinbem-dev/revue"
+readme = "README.md"
+keywords = ["code-review", "ai", "github", "forgejo", "gemini"]
+categories = ["development-tools", "command-line-utilities"]
+
+[[bin]]
+name = "revue"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }

@@ -1,5 +1,5 @@
 {
-  description = "Nix-native AI PR code review engine with subscription fallback (Claude, Gemini, Ollama) and Forgejo support";
+  description = "Self-hosted, forge-agnostic AI code review engine with multi-provider cascade (Gemini, Claude, Ollama)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -19,13 +19,22 @@
     {
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
-          pname = "nix-revue";
+          pname = "revue";
           version = "0.1.0";
           src = ./.;
           cargoLock = {
             lockFile = ./Cargo.lock;
           };
           nativeBuildInputs = [ pkgs.pkg-config ];
+          postInstall = ''
+            ln -s $out/bin/revue $out/bin/nix-revue
+          '';
+          meta = with lib; {
+            description = "Self-hosted, forge-agnostic AI code review engine";
+            homepage = "https://github.com/kleinbem-dev/revue";
+            license = with licenses; [ mit asl20 ];
+            mainProgram = "revue";
+          };
         };
       });
 
@@ -43,6 +52,7 @@
       });
 
       overlays.default = final: prev: {
+        revue = self.packages.${prev.system}.default;
         nix-revue = self.packages.${prev.system}.default;
       };
 
@@ -57,6 +67,7 @@
           imports = [ ./nix/module.nix ];
           nixpkgs.overlays = [ self.overlays.default ];
         };
+      nixosModules.revue = self.nixosModules.default;
       nixosModules.nix-revue = self.nixosModules.default;
     };
 }

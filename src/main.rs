@@ -12,8 +12,8 @@ pub mod server;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "nix-revue",
-    about = "Nix-native AI PR review engine with subscription fallback (Claude, Gemini, Ollama)",
+    name = "revue",
+    about = "Self-hosted, forge-agnostic AI code review engine with multi-provider cascade (Gemini, Claude, Ollama)",
     version
 )]
 struct Cli {
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "nix_revue=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "revue=info,nix_revue=info,tower_http=info".into()),
         )
         .init();
 
@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
             reviewer::run_pr_review(index, repo.as_deref(), dry_run, cli.config.as_deref()).await?;
         }
         Commands::Daemon { listen, webhook_secret } => {
-            info!("Starting nix-revue daemon");
+            info!("Starting revue daemon");
             server::run_daemon(&listen, cli.config.as_deref(), webhook_secret.as_deref()).await?;
         }
     }
