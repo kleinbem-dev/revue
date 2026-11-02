@@ -396,16 +396,22 @@ pub async fn run_pr_review(
     let config = RevueConfig::find_and_load(config_path)?;
     let repo = repo_arg.ok_or_else(|| anyhow!("--repo is required for PR review"))?;
 
-    let forge: Box<dyn Forge> = if config.forge.r#type == "forgejo"
-        || config.forge.url.contains("git.")
-        || config.forge.token.is_some()
-    {
+    let is_forgejo = if config.forge.r#type == "forgejo" {
+        true
+    } else if config.forge.r#type == "github" {
+        false
+    } else {
+        // "auto": determine from repo name or explicitly configured forgejo URL
+        repo.contains("git.") || repo.contains("forgejo")
+    };
+
+    let forge: Box<dyn Forge> = if is_forgejo {
         Box::new(ForgejoClient::new(
             config.forge.url.clone(),
             config.forge.token.clone(),
         )?)
     } else {
-        Box::new(GitHubClient::new(None)?)
+        Box::new(GitHubClient::new(config.forge.token.clone())?)
     };
 
     info!("Fetching PR #{} diff for {}", index, repo);
