@@ -3,7 +3,7 @@ use crate::diff::ParsedDiff;
 use crate::forges::{forgejo::ForgejoClient, github::GitHubClient, Forge, InlineReviewComment};
 use crate::providers::{
     antigravity::AntigravityCliProvider, claude::ClaudeCliProvider, gemini::GeminiProvider,
-    ollama::OllamaProvider, Provider, ProviderChain,
+    mesh_llm::MeshLlmProvider, ollama::OllamaProvider, Provider, ProviderChain,
 };
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,12 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
         match name.as_str() {
             "antigravity" | "gemini-cli" | "antigravity-cli" => {
                 providers.push(Box::new(AntigravityCliProvider::new()));
+            }
+            "mesh-llm" | "mesh" => {
+                providers.push(Box::new(MeshLlmProvider::new(
+                    config.providers.mesh_llm_url.clone(),
+                    config.providers.mesh_llm_model.clone(),
+                )));
             }
             "claude" | "claude-cli" => {
                 providers.push(Box::new(ClaudeCliProvider::new()));

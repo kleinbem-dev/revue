@@ -18,6 +18,15 @@
 			latency_avg: '14.2s'
 		},
 		{
+			id: 'mesh-llm',
+			name: 'Mesh-LLM (Fleet P2P)',
+			type: 'local_gpu',
+			model: 'Qwen3-4B-Q4_K_M (CUDA)',
+			status: 'ready',
+			cost_per_token: '$0.00 / fleet GPU',
+			latency_avg: '1.8s'
+		},
+		{
 			id: 'gemini-api',
 			name: 'Google AI Studio REST',
 			type: 'api',

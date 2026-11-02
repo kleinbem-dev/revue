@@ -199,6 +199,14 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
             latency_avg: "2.1s".to_string(),
         },
         ProviderStatus {
+            name: "Mesh-LLM (Fleet P2P)".to_string(),
+            r#type: "mesh-gpu".to_string(),
+            model: "Qwen3-4B-Q4_K_M (CUDA)".to_string(),
+            status: "ready".to_string(),
+            cost_per_token: "$0 (P2P GPU)".to_string(),
+            latency_avg: "1.8s".to_string(),
+        },
+        ProviderStatus {
             name: "Gemini API".to_string(),
             r#type: "api".to_string(),
             model: "gemini-2.5-flash".to_string(),

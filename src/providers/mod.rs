@@ -5,6 +5,7 @@ use tracing::{info, warn};
 pub mod antigravity;
 pub mod claude;
 pub mod gemini;
+pub mod mesh_llm;
 pub mod ollama;
 
 #[async_trait]

@@ -58,9 +58,13 @@ impl Default for ForgeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersConfig {
-    /// Cascade failover order (e.g. ["claude-cli", "gemini", "ollama"])
+    /// Cascade failover order (e.g. ["antigravity", "mesh-llm", "gemini-api", "ollama", "claude"])
     #[serde(default = "default_cascade")]
     pub cascade: Vec<String>,
+    #[serde(default = "default_mesh_llm_url")]
+    pub mesh_llm_url: String,
+    #[serde(default = "default_mesh_llm_model")]
+    pub mesh_llm_model: String,
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
     #[serde(default = "default_ollama_model")]
@@ -72,10 +76,19 @@ pub struct ProvidersConfig {
 fn default_cascade() -> Vec<String> {
     vec![
         "antigravity".to_string(),
+        "mesh-llm".to_string(),
         "gemini-api".to_string(),
         "ollama".to_string(),
         "claude".to_string(),
     ]
+}
+
+fn default_mesh_llm_url() -> String {
+    std::env::var("MESH_LLM_URL").unwrap_or_else(|_| "http://127.0.0.1:9337/v1".to_string())
+}
+
+fn default_mesh_llm_model() -> String {
+    std::env::var("MESH_LLM_MODEL").unwrap_or_else(|_| "Qwen3-4B-Q4_K_M".to_string())
 }
 
 fn default_ollama_url() -> String {
@@ -94,6 +107,8 @@ impl Default for ProvidersConfig {
     fn default() -> Self {
         Self {
             cascade: default_cascade(),
+            mesh_llm_url: default_mesh_llm_url(),
+            mesh_llm_model: default_mesh_llm_model(),
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
             gemini_model: default_gemini_model(),
@@ -297,10 +312,13 @@ forge:
 providers:
   cascade:
     - antigravity  # Google Gemini subscription via Antigravity CLI ($0 key, zero setup)
+    - mesh-llm     # Fleet P2P GPU mesh (via local router or orin-nano)
     - gemini-api   # Google AI Studio REST API (fallback if key is set)
     - ollama       # Local offline GPU inference (fallback)
     - claude       # Claude Code CLI (last resort)
 
+  mesh_llm_url: "http://127.0.0.1:9337/v1"
+  mesh_llm_model: "Qwen3-4B-Q4_K_M"
   ollama_url: "http://127.0.0.1:11434"
   ollama_model: "qwen2.5-coder:14b"
   gemini_model: "gemini-2.0-flash"
@@ -361,8 +379,9 @@ mod tests {
         let config: RevueConfig = serde_yaml::from_str(yaml).expect("Template should be valid YAML");
         assert_eq!(config.version, 1);
         assert_eq!(config.forge.url, "https://git.kleinbem.dev");
-        assert_eq!(config.providers.cascade.len(), 4);
+        assert_eq!(config.providers.cascade.len(), 5);
         assert_eq!(config.providers.cascade[0], "antigravity");
+        assert_eq!(config.providers.cascade[1], "mesh-llm");
         assert!(config.review.ignore.contains(&"**/flake.lock".to_string()));
     }
 
