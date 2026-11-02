@@ -105,6 +105,8 @@ pub struct ReviewSection {
     pub min_severity: String,
     #[serde(default = "default_true")]
     pub summary: bool,
+    #[serde(default = "default_true")]
+    pub two_pass: bool,
     #[serde(default)]
     pub ignore: Vec<String>,
     #[serde(default)]
@@ -140,6 +142,7 @@ impl Default for ReviewSection {
             language: default_language(),
             min_severity: default_min_severity(),
             summary: true,
+            two_pass: true,
             ignore: vec![
                 "**/flake.lock".to_string(),
                 "**/Cargo.lock".to_string(),
@@ -295,6 +298,9 @@ review:
   language: en-GB
   tone: "Short and direct. Lead with the problem and the fix. No praise, no filler."
   
+  # Two-pass verification: Pass 1 discovers candidate bugs, Pass 2 judges & filters false positives
+  two_pass: true
+
   # Minimum severity level to post inline comments: info | warning | error | critical
   min_severity: warning
 

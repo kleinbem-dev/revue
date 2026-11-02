@@ -32,16 +32,15 @@ impl Provider for ClaudeCliProvider {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
+            let combined = format!("{}\n{}", stderr, stdout);
+            if combined.contains("usage limit") || combined.contains("rate limit") || combined.contains("overloaded") {
+                return Err(anyhow!("Claude usage limit detected: {}", combined.trim()));
+            }
             return Err(anyhow!(
                 "Claude CLI exited with code {:?}. Stderr: {}",
                 output.status.code(),
                 stderr.trim()
             ));
-        }
-
-        // Detect rate-limit or quota error strings in output
-        if stdout.contains("usage limit") || stdout.contains("rate limit") || stdout.contains("overloaded") {
-            return Err(anyhow!("Claude usage limit detected: {}", stdout.trim()));
         }
 
         Ok(stdout)

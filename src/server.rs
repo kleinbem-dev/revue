@@ -21,12 +21,25 @@ struct WebhookPayload {
     action: Option<String>,
     number: Option<u64>,
     pull_request: Option<PullRequestObject>,
+    issue: Option<IssueObject>,
+    comment: Option<CommentObject>,
     repository: Option<RepositoryObject>,
 }
 
 #[derive(Deserialize, Debug)]
 struct PullRequestObject {
     number: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
+struct IssueObject {
+    number: Option<u64>,
+    pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Debug)]
+struct CommentObject {
+    body: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -50,31 +63,56 @@ async fn handle_webhook(
         .and_then(|h| h.to_str().ok())
         .unwrap_or_default();
 
-    if event != "pull_request" {
-        return (
-            StatusCode::OK,
-            format!("Ignored event '{}' (only pull_request is handled)", event),
-        );
-    }
-
     let action = payload.action.as_deref().unwrap_or_default();
-    if action != "opened" && action != "synchronized" && action != "reopened" {
-        return (
-            StatusCode::OK,
-            format!("Ignored PR action '{}' (only opened/synchronize/reopen)", action),
-        );
-    }
-
-    let pr_number = payload
-        .number
-        .or_else(|| payload.pull_request.as_ref().and_then(|pr| pr.number));
-
     let repo_full_name = payload
         .repository
         .as_ref()
         .and_then(|r| r.full_name.clone());
 
-    let (pr_index, repo) = match (pr_number, repo_full_name) {
+    let pr_index = if event == "pull_request" {
+        if action != "opened" && action != "synchronized" && action != "synchronize" && action != "reopened" {
+            return (
+                StatusCode::OK,
+                format!("Ignored PR action '{}' (only opened/synchronize/reopen)", action),
+            );
+        }
+        payload
+            .number
+            .or_else(|| payload.pull_request.as_ref().and_then(|pr| pr.number))
+    } else if event == "issue_comment" {
+        if action != "created" {
+            return (
+                StatusCode::OK,
+                format!("Ignored comment action '{}' (only created)", action),
+            );
+        }
+
+        // Only handle comments on pull requests
+        let is_pr = payload.issue.as_ref().and_then(|i| i.pull_request.as_ref()).is_some();
+        if !is_pr {
+            return (
+                StatusCode::OK,
+                "Ignored comment on regular issue (not a pull request)".to_string(),
+            );
+        }
+
+        let body = payload.comment.as_ref().and_then(|c| c.body.as_deref()).unwrap_or("");
+        if !body.contains("@nix-revue") {
+            return (
+                StatusCode::OK,
+                "Ignored PR comment (did not mention @nix-revue)".to_string(),
+            );
+        }
+
+        payload.issue.as_ref().and_then(|i| i.number)
+    } else {
+        return (
+            StatusCode::OK,
+            format!("Ignored event '{}' (only pull_request and issue_comment are handled)", event),
+        );
+    };
+
+    let (pr_num, repo) = match (pr_index, repo_full_name) {
         (Some(num), Some(r)) => (num, r),
         _ => {
             warn!("Webhook missing PR number or repository name");
@@ -82,19 +120,19 @@ async fn handle_webhook(
         }
     };
 
-    info!("Received PR webhook for {} #{} (action: {})", repo, pr_index, action);
+    info!("Received {} webhook for {} #{} (action: {})", event, repo, pr_num, action);
 
     let config_path = state.config_path.clone();
     let repo_for_review = repo.clone();
 
     // Spawn review asynchronously in background so webhook returns 200 immediately
     tokio::spawn(async move {
-        if let Err(e) = run_pr_review(pr_index, Some(&repo_for_review), false, config_path.as_deref()).await {
-            error!("Failed to execute review for {} #{}: {:?}", repo_for_review, pr_index, e);
+        if let Err(e) = run_pr_review(pr_num, Some(&repo_for_review), false, config_path.as_deref()).await {
+            error!("Failed to execute review for {} #{}: {:?}", repo_for_review, pr_num, e);
         }
     });
 
-    (StatusCode::ACCEPTED, format!("Review queued for {} #{}", repo, pr_index))
+    (StatusCode::ACCEPTED, format!("Review queued for {} #{}", repo, pr_num))
 }
 
 pub async fn run_daemon(listen: &str, config_path: Option<&str>) -> Result<()> {

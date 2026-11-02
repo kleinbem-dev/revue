@@ -63,31 +63,130 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
     ProviderChain::new(providers)
 }
 
-pub fn generate_review_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
-    let tone = &config.review.tone;
-
-    let mut rules_text = String::new();
-    for rule in &config.review.rules {
-        rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
-    }
-
-    let mut files_diff_text = String::new();
+fn format_diff_and_context(diff: &ParsedDiff) -> String {
+    let mut out = String::new();
     for f in &diff.files {
-        files_diff_text.push_str(&format!("--- a/{}\n+++ b/{}\n", f.new_path, f.new_path));
+        out.push_str(&format!("=== MODIFIED FILE: {} ===\n", f.new_path));
+        out.push_str(&format!("--- a/{}\n+++ b/{}\n", f.new_path, f.new_path));
         for h in &f.hunks {
-            files_diff_text.push_str(&format!(
+            out.push_str(&format!(
                 "@@ -{},{} +{},{} @@\n",
                 h.old_start, h.old_lines, h.new_start, h.new_lines
             ));
             for l in &h.lines {
-                files_diff_text.push_str(l);
-                files_diff_text.push('\n');
+                out.push_str(l);
+                out.push('\n');
             }
         }
+
+        if let Some(ctx) = &f.file_context {
+            out.push_str(&format!("\n[SURROUNDING FILE CONTEXT FOR {} (numbered lines)]:\n", f.new_path));
+            out.push_str(ctx);
+            out.push('\n');
+        }
+        out.push('\n');
     }
+    out
+}
+
+pub fn generate_pass1_detective_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
+    let mut rules_text = String::new();
+    for rule in &config.review.rules {
+        rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
+    }
+    let code_content = format_diff_and_context(diff);
 
     format!(
-        r#"You are an expert, highly critical code reviewer.
+r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
+
+You are an expert, highly investigative code detective.
+Your task is PASS 1: Broad Defect Discovery.
+
+Carefully examine the git diff and the surrounding file context below.
+Discover all potential defects, edge cases, subtle logic bugs, security holes, concurrency issues, and broken assumptions.
+
+REPOSITORY RULES:
+{rules_text}
+
+INSTRUCTIONS:
+1. Check how modified lines interact with the surrounding code (variable initializations, error returns, calling conventions).
+2. For every potential issue you spot, output a bullet point containing:
+   - File and line number
+   - The hypothesized bug / vulnerability / edge case
+   - Why it might fail or what assumption breaks
+3. DO NOT comment on code formatting, whitespace, or minor naming nits.
+4. Output your analysis in clear, structured markdown bullet points.
+
+CODE UNDER REVIEW:
+{code_content}
+"#
+    )
+}
+
+pub fn generate_pass2_judge_prompt(
+    diff: &ParsedDiff,
+    config: &RevueConfig,
+    candidates: &str,
+) -> String {
+    let tone = &config.review.tone;
+    let code_content = format_diff_and_context(diff);
+
+    format!(
+r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
+
+You are a Senior Principal Engineer and Impartial Review Judge.
+Your task is PASS 2: Verification and Precision Filtering.
+
+In Pass 1, an auditor proposed the candidate concerns below.
+Your job is to rigorously evaluate each candidate against the actual code diff and surrounding context.
+
+CANDIDATE ISSUES FROM PASS 1:
+{candidates}
+
+VERIFICATION GUIDELINES:
+1. Verify if each issue is a TRUE DEFECT or a false positive (check if surrounding code already handles it, or if it is intentional).
+2. Verify the exact line number exists in the diff additions.
+3. Score each finding's confidence from 1 to 10. Discard anything below 8.
+4. Eliminate all stylistic nits and subjective opinions. Keep only verified, actionable defects.
+5. Provide a raw code replacement in `suggestion` whenever possible.
+
+TONE INSTRUCTIONS:
+{tone}
+
+OUTPUT FORMAT:
+Output ONLY a single valid JSON object matching this schema:
+{{
+  "summary": "1-3 high-level bullet points summarizing the PR changes and impact",
+  "issues": [
+    {{
+      "file": "path/to/file.ext",
+      "line": 42,
+      "severity": "bug|security|performance|warning",
+      "title": "Short title describing the defect",
+      "comment": "Why this is an issue and how to resolve it",
+      "suggestion": "optional replacement code"
+    }}
+  ]
+}}
+
+CODE UNDER REVIEW:
+{code_content}
+"#
+    )
+}
+
+pub fn generate_single_pass_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
+    let tone = &config.review.tone;
+    let mut rules_text = String::new();
+    for rule in &config.review.rules {
+        rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
+    }
+    let code_content = format_diff_and_context(diff);
+
+    format!(
+r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
+
+You are an expert, highly critical code reviewer.
 Review the following git diff and output ONLY a valid JSON object matching the requested schema.
 
 TONE INSTRUCTIONS:
@@ -117,10 +216,35 @@ SCHEMA:
   ]
 }}
 
-DIFF TO REVIEW:
-{files_diff_text}
+DIFF AND CONTEXT:
+{code_content}
 "#
     )
+}
+
+pub async fn execute_review_pipeline(
+    diff: &ParsedDiff,
+    config: &RevueConfig,
+    chain: &ProviderChain,
+) -> Result<(ReviewOutput, String)> {
+    if !config.review.two_pass {
+        info!("Running single-pass review pipeline");
+        let prompt = generate_single_pass_prompt(diff, config);
+        let (resp, prov) = chain.complete_with_fallback(&prompt).await?;
+        let parsed = parse_review_response(&resp)?;
+        return Ok((parsed, prov));
+    }
+
+    info!("Executing Review Pass 1 (Detective - broad anomaly discovery)...");
+    let pass1_prompt = generate_pass1_detective_prompt(diff, config);
+    let (pass1_candidates, provider_name) = chain.complete_with_fallback(&pass1_prompt).await?;
+
+    info!("Executing Review Pass 2 (Judge - verification & confidence filtering)...");
+    let pass2_prompt = generate_pass2_judge_prompt(diff, config, &pass1_candidates);
+    let (pass2_response, _) = chain.complete_with_fallback(&pass2_prompt).await?;
+
+    let review = parse_review_response(&pass2_response)?;
+    Ok((review, provider_name))
 }
 
 pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
@@ -182,11 +306,11 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
         return Ok(());
     }
 
-    let prompt = generate_review_prompt(&parsed, &config);
-    let chain = build_provider_chain(&config);
-    let (response, provider_name) = chain.complete_with_fallback(&prompt).await?;
+    // Enrich with actual surrounding code from disk
+    parsed.enrich_with_disk_context(None);
 
-    let review = parse_review_response(&response)?;
+    let chain = build_provider_chain(&config);
+    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain).await?;
 
     if format == "json" {
         println!("{}", serde_json::to_string_pretty(&review)?);
@@ -243,10 +367,11 @@ pub async fn run_pr_review(
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
     parsed.apply_filters(&config.review.ignore);
 
-    let prompt = generate_review_prompt(&parsed, &config);
+    // Enrich with local filesystem context if working inside a checkout of the repo
+    parsed.enrich_with_disk_context(None);
+
     let chain = build_provider_chain(&config);
-    let (response, provider_name) = chain.complete_with_fallback(&prompt).await?;
-    let review = parse_review_response(&response)?;
+    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain).await?;
 
     let mut inline_comments = Vec::new();
     for issue in &review.issues {
@@ -291,7 +416,6 @@ pub async fn run_pr_review(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

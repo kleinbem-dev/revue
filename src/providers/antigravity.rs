@@ -23,8 +23,12 @@ impl Provider for AntigravityCliProvider {
     }
 
     async fn complete(&self, prompt: &str) -> Result<String> {
+        let effort = std::env::var("REVUE_GEMINI_EFFORT").unwrap_or_else(|_| "low".to_string());
         let output = Command::new(&self.bin_path)
             .arg("--dangerously-skip-permissions")
+            .arg("--disable-slash-commands")
+            .arg("--effort")
+            .arg(&effort)
             .arg("-p")
             .arg(prompt)
             .output()
@@ -35,16 +39,15 @@ impl Provider for AntigravityCliProvider {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
+            let combined = format!("{}\n{}", stderr, stdout);
+            if combined.contains("quota exceeded") || combined.contains("rate limit") {
+                return Err(anyhow!("Gemini quota limit detected: {}", combined.trim()));
+            }
             return Err(anyhow!(
                 "Antigravity CLI exited with code {:?}. Stderr: {}",
                 output.status.code(),
                 stderr.trim()
             ));
-        }
-
-        // Detect rate-limit or error strings if any
-        if stdout.contains("quota exceeded") || stdout.contains("rate limit") {
-            return Err(anyhow!("Gemini quota limit detected: {}", stdout.trim()));
         }
 
         Ok(stdout)

@@ -13,6 +13,7 @@ pub struct FilePatch {
     pub hunks: Vec<DiffHunk>,
     pub valid_lines: HashSet<u64>,
     pub raw_patch: String,
+    pub file_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +81,7 @@ impl ParsedDiff {
                 hunks,
                 valid_lines,
                 raw_patch: format!("{:?}", p),
+                file_context: None,
             });
         }
 
@@ -105,6 +107,49 @@ impl ParsedDiff {
             }
             true
         });
+    }
+
+    /// Enrich diff with actual surrounding file context from disk (like CodeRabbit AST context)
+    pub fn enrich_with_disk_context(&mut self, root_dir: Option<&std::path::Path>) {
+        let base = root_dir.unwrap_or_else(|| std::path::Path::new("."));
+
+        for f in &mut self.files {
+            let file_path = base.join(&f.new_path);
+            if file_path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&file_path) {
+                    let lines: Vec<&str> = content.lines().collect();
+                    if lines.len() <= 500 {
+                        let mut numbered = String::new();
+                        for (idx, line) in lines.iter().enumerate() {
+                            numbered.push_str(&format!("{:4} | {}\n", idx + 1, line));
+                        }
+                        f.file_context = Some(numbered);
+                    } else {
+                        let mut included_lines = std::collections::BTreeSet::new();
+                        for h in &f.hunks {
+                            let start = h.new_start.saturating_sub(40).max(1);
+                            let end = (h.new_start + h.new_lines + 40).min(lines.len() as u64);
+                            for l in start..=end {
+                                included_lines.insert(l);
+                            }
+                        }
+
+                        let mut excerpt = String::new();
+                        let mut last_line = 0;
+                        for line_num in included_lines {
+                            if last_line != 0 && line_num > last_line + 1 {
+                                excerpt.push_str("     ...\n");
+                            }
+                            if let Some(line) = lines.get((line_num - 1) as usize) {
+                                excerpt.push_str(&format!("{:4} | {}\n", line_num, line));
+                            }
+                            last_line = line_num;
+                        }
+                        f.file_context = Some(excerpt);
+                    }
+                }
+            }
+        }
     }
 
     /// Check if a proposed comment line is within the diff hunk additions/modifications
