@@ -10,6 +10,7 @@ export interface Finding {
 	snippet?: string;
 	category?: string;
 	committable_patch?: string;
+	feedback?: string;
 }
 
 export interface ReviewRecord {

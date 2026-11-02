@@ -37,6 +37,17 @@ pub struct AggregateMetrics {
     pub total_cost_saved: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingFeedback {
+    pub id: i64,
+    pub repo: String,
+    pub file_path: String,
+    pub issue_title: String,
+    pub feedback_type: String,
+    pub reason: Option<String>,
+    pub created_at: String,
+}
+
 pub fn default_database_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         return url;
@@ -106,6 +117,17 @@ impl DbPool {
             );
             CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo, pr_number);
             CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS findings_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                issue_title TEXT NOT NULL,
+                feedback_type TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feedback_repo ON findings_feedback(repo, feedback_type);
             "#
         )
         .execute(pool)
@@ -135,6 +157,17 @@ impl DbPool {
             );
             CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo, pr_number);
             CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS findings_feedback (
+                id BIGSERIAL PRIMARY KEY,
+                repo TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                issue_title TEXT NOT NULL,
+                feedback_type TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feedback_repo ON findings_feedback(repo, feedback_type);
             "#
         )
         .execute(pool)
@@ -342,6 +375,122 @@ impl DbPool {
 
         Ok(reviews)
     }
+
+    pub async fn record_feedback(
+        &self,
+        repo: &str,
+        file_path: &str,
+        issue_title: &str,
+        feedback_type: &str,
+        reason: Option<&str>,
+    ) -> Result<i64> {
+        let now = Utc::now().to_rfc3339();
+
+        match self {
+            DbPool::Sqlite(pool) => {
+                let res = sqlx::query(
+                    r#"
+                    INSERT INTO findings_feedback (repo, file_path, issue_title, feedback_type, reason, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    "#
+                )
+                .bind(repo)
+                .bind(file_path)
+                .bind(issue_title)
+                .bind(feedback_type)
+                .bind(reason)
+                .bind(now)
+                .execute(pool)
+                .await?;
+
+                Ok(res.last_insert_rowid())
+            }
+            DbPool::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    INSERT INTO findings_feedback (repo, file_path, issue_title, feedback_type, reason, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING id
+                    "#
+                )
+                .bind(repo)
+                .bind(file_path)
+                .bind(issue_title)
+                .bind(feedback_type)
+                .bind(reason)
+                .bind(now)
+                .fetch_one(pool)
+                .await?;
+
+                Ok(row.get(0))
+            }
+        }
+    }
+
+    pub async fn get_false_positives(&self, repo: &str, limit: i64) -> Result<Vec<FindingFeedback>> {
+        match self {
+            DbPool::Sqlite(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+                    FROM findings_feedback
+                    WHERE repo = ? AND feedback_type = 'false_positive'
+                    ORDER BY id DESC
+                    LIMIT ?
+                    "#
+                )
+                .bind(repo)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+
+                let feedback = rows
+                    .into_iter()
+                    .map(|r| FindingFeedback {
+                        id: r.get(0),
+                        repo: r.get(1),
+                        file_path: r.get(2),
+                        issue_title: r.get(3),
+                        feedback_type: r.get(4),
+                        reason: r.get(5),
+                        created_at: r.get(6),
+                    })
+                    .collect();
+
+                Ok(feedback)
+            }
+            DbPool::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+                    FROM findings_feedback
+                    WHERE repo = $1 AND feedback_type = 'false_positive'
+                    ORDER BY id DESC
+                    LIMIT $2
+                    "#
+                )
+                .bind(repo)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+
+                let feedback = rows
+                    .into_iter()
+                    .map(|r| FindingFeedback {
+                        id: r.get(0),
+                        repo: r.get(1),
+                        file_path: r.get(2),
+                        issue_title: r.get(3),
+                        feedback_type: r.get(4),
+                        reason: r.get(5),
+                        created_at: r.get(6),
+                    })
+                    .collect();
+
+                Ok(feedback)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -383,5 +532,35 @@ mod tests {
         let recent = db.list_recent_reviews(10).await.expect("Should list reviews");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].repo, "kleinbem/nix-config");
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_feedback_lifecycle() {
+        let db = DbPool::connect("sqlite::memory:")
+            .await
+            .expect("Should connect to in-memory sqlite");
+
+        let fid = db
+            .record_feedback(
+                "kleinbem/nix-config",
+                "hosts/nixos-nvme/default.nix",
+                "ProtectHome read-only warning",
+                "false_positive",
+                Some("Intentionally read-only in nspawn containers"),
+            )
+            .await
+            .expect("Should record feedback");
+
+        assert!(fid > 0);
+
+        let fps = db
+            .get_false_positives("kleinbem/nix-config", 5)
+            .await
+            .expect("Should fetch false positives");
+
+        assert_eq!(fps.len(), 1);
+        assert_eq!(fps[0].issue_title, "ProtectHome read-only warning");
+        assert_eq!(fps[0].feedback_type, "false_positive");
+        assert_eq!(fps[0].reason.as_deref(), Some("Intentionally read-only in nspawn containers"));
     }
 }

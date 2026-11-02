@@ -97,11 +97,19 @@ fn format_diff_and_context(diff: &ParsedDiff) -> String {
     crate::scrubber::scrub_diff(&out).0
 }
 
+fn get_skills_block(diff: &ParsedDiff, config: &RevueConfig) -> String {
+    let changed_files: Vec<String> = diff.files.iter().map(|f| f.new_path.clone()).collect();
+    let skills_dir = crate::skills::find_skills_dir(config.review.skills_dir.as_deref());
+    let matching_skills = crate::skills::find_matching_skills(skills_dir.as_deref(), &changed_files);
+    crate::skills::format_skills_for_prompt(&matching_skills)
+}
+
 pub fn generate_pass1_detective_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
     let mut rules_text = String::new();
     for rule in &config.review.rules {
         rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
     }
+    let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
 
     format!(
@@ -115,7 +123,7 @@ Discover all potential defects, edge cases, subtle logic bugs, security holes, c
 
 REPOSITORY RULES:
 {rules_text}
-
+{skills_text}
 INSTRUCTIONS:
 1. Check how modified lines interact with the surrounding code (variable initializations, error returns, calling conventions).
 2. For every potential issue you spot, output a bullet point containing:
@@ -135,9 +143,25 @@ pub fn generate_pass2_judge_prompt(
     diff: &ParsedDiff,
     config: &RevueConfig,
     candidates: &str,
+    false_positives: &[crate::db::FindingFeedback],
 ) -> String {
     let tone = &config.review.tone;
+    let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
+
+    let mut fp_text = String::new();
+    if !false_positives.is_empty() {
+        fp_text.push_str("\nPREVIOUSLY DISMISSED FALSE POSITIVES (DO NOT RE-FLAG THESE):\n");
+        fp_text.push_str("The engineering team previously flagged and dismissed the following candidate issues as false alarms:\n");
+        for item in false_positives {
+            fp_text.push_str(&format!("- In `{}`: \"{}\"", item.file_path, item.issue_title));
+            if let Some(reason) = &item.reason {
+                fp_text.push_str(&format!(" (Reason: {})", reason));
+            }
+            fp_text.push('\n');
+        }
+        fp_text.push_str("If any candidate issue from Pass 1 matches or resembles these patterns, DISCARD it immediately as an intentional pattern.\n");
+    }
 
     format!(
 r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
@@ -160,7 +184,8 @@ VERIFICATION GUIDELINES:
 
 TONE INSTRUCTIONS:
 {tone}
-
+{skills_text}
+{fp_text}
 OUTPUT FORMAT:
 Output ONLY a single valid JSON object matching this schema:
 {{
@@ -189,6 +214,7 @@ pub fn generate_single_pass_prompt(diff: &ParsedDiff, config: &RevueConfig) -> S
     for rule in &config.review.rules {
         rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
     }
+    let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
 
     format!(
@@ -202,7 +228,7 @@ TONE INSTRUCTIONS:
 
 REPOSITORY-SPECIFIC RULES:
 {rules_text}
-
+{skills_text}
 GENERAL GUIDELINES:
 1. Focus strictly on real bugs, security vulnerabilities, race conditions, edge cases, logic flaws, and breaking changes.
 2. DO NOT comment on formatting, whitespace, or minor stylistic nits that linters handle.
@@ -234,6 +260,7 @@ pub async fn execute_review_pipeline(
     diff: &ParsedDiff,
     config: &RevueConfig,
     chain: &ProviderChain,
+    false_positives: &[crate::db::FindingFeedback],
 ) -> Result<(ReviewOutput, String)> {
     if !config.review.two_pass {
         info!("Running single-pass review pipeline");
@@ -248,7 +275,7 @@ pub async fn execute_review_pipeline(
     let (pass1_candidates, provider_name) = chain.complete_with_fallback(&pass1_prompt).await?;
 
     info!("Executing Review Pass 2 (Judge - verification & confidence filtering)...");
-    let pass2_prompt = generate_pass2_judge_prompt(diff, config, &pass1_candidates);
+    let pass2_prompt = generate_pass2_judge_prompt(diff, config, &pass1_candidates, false_positives);
     let (pass2_response, _) = chain.complete_with_fallback(&pass2_prompt).await?;
 
     let review = parse_review_response(&pass2_response)?;
@@ -304,7 +331,7 @@ pub async fn review_diff_content(
     let config = RevueConfig::find_and_load(config_path)?;
     let parsed = crate::diff::ParsedDiff::parse(raw_diff)?;
     let chain = build_provider_chain(&config);
-    execute_review_pipeline(&parsed, &config, &chain).await
+    execute_review_pipeline(&parsed, &config, &chain, &[]).await
 }
 
 pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>) -> Result<()> {
@@ -329,7 +356,7 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     parsed.enrich_with_disk_context(None);
 
     let chain = build_provider_chain(&config);
-    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain).await?;
+    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain, &[]).await?;
 
     if format == "json" {
         println!("{}", serde_json::to_string_pretty(&review)?);
@@ -390,7 +417,7 @@ pub async fn run_pr_review(
     parsed.enrich_with_disk_context(None);
 
     let chain = build_provider_chain(&config);
-    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain).await?;
+    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain, &[]).await?;
 
     let mut inline_comments = Vec::new();
     for issue in &review.issues {

@@ -12,6 +12,7 @@
 	let filter = $state<'all' | 'critical' | 'error' | 'warning' | 'info'>('all');
 	let copiedFindingId = $state<string | null>(null);
 	let copiedPromptId = $state<string | null>(null);
+	let markingFalsePositive = $state<string | null>(null);
 
 	const findingsList = $derived(review?.findings ?? []);
 
@@ -65,6 +66,31 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 				if (copiedPromptId === id) copiedPromptId = null;
 			}, 2000);
 		});
+	}
+
+	async function markFalsePositive(finding: Finding, id: string) {
+		markingFalsePositive = id;
+		try {
+			const res = await fetch('/api/feedback', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					review_id: review.id,
+					repo: review.repo,
+					file_path: finding.file,
+					issue_title: finding.title,
+					feedback_type: 'false_positive',
+					reason: 'Dismissed by engineer via Revue web dashboard'
+				})
+			});
+			if (res.ok) {
+				finding.feedback = 'false_positive';
+			}
+		} catch (e) {
+			console.error('Failed to submit feedback:', e);
+		} finally {
+			markingFalsePositive = null;
+		}
 	}
 </script>
 
@@ -252,6 +278,25 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 											<span>🤖</span> Prompt for AI Agent
 										{/if}
 									</button>
+
+									{#if finding.feedback === 'false_positive'}
+										<span class="feedback-badge dismissed" title="Revue learned this was a false alarm and will prune similar findings for {review.repo}">
+											<span>🚫</span> Dismissed as False Alarm (Learned)
+										</span>
+									{:else}
+										<button
+											class="action-btn dismiss-btn"
+											disabled={markingFalsePositive === findingKey}
+											onclick={() => markFalsePositive(finding, findingKey)}
+											title="Mark this finding as a false positive. Revue learns from this dismissal and adds it as a negative constraint for future reviews of this repo."
+										>
+											{#if markingFalsePositive === findingKey}
+												<span>⏳</span> Saving...
+											{:else}
+												<span>👎</span> False Alarm
+											{/if}
+										</button>
+									{/if}
 								</div>
 							</div>
 						{/each}
@@ -681,6 +726,36 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 		background: linear-gradient(135deg, rgba(249, 115, 22, 0.25) 0%, rgba(139, 92, 246, 0.25) 100%);
 		border-color: #f97316;
 		color: #ffedd5;
+	}
+
+	.dismiss-btn {
+		background: rgba(239, 68, 68, 0.1);
+		border-color: rgba(239, 68, 68, 0.25);
+		color: #fca5a5;
+	}
+
+	.dismiss-btn:hover:not(:disabled) {
+		background: rgba(239, 68, 68, 0.2);
+		border-color: rgba(239, 68, 68, 0.45);
+		color: #ffffff;
+	}
+
+	.dismiss-btn:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.feedback-badge.dismissed {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.45rem 0.85rem;
+		border-radius: 0.45rem;
+		background: rgba(168, 85, 247, 0.12);
+		border: 1px solid rgba(168, 85, 247, 0.35);
+		color: #d8b4fe;
+		font-size: 0.8rem;
+		font-weight: 500;
 	}
 
 	.success-icon {

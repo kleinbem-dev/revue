@@ -32,6 +32,8 @@ pub struct Finding {
     pub body: String,
     pub snippet: Option<String>,
     pub confidence: Option<u8>,
+    #[serde(default)]
+    pub feedback: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -85,6 +87,16 @@ pub struct DaemonStatusResponse {
 pub struct TriggerRequest {
     pub repo: String,
     pub pr: u64,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct FeedbackRequest {
+    pub review_id: Option<String>,
+    pub repo: String,
+    pub file_path: String,
+    pub issue_title: String,
+    pub feedback_type: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -297,6 +309,61 @@ async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse
     Json(reviews.clone())
 }
 
+async fn record_finding_feedback(
+    State(state): State<Arc<ServerState>>,
+    Json(req): Json<FeedbackRequest>,
+) -> impl IntoResponse {
+    info!(
+        "Received feedback '{}' for {} [{}: {}]",
+        req.feedback_type, req.repo, req.file_path, req.issue_title
+    );
+
+    // 1. Record into persistent DB if available
+    if let Some(db) = &state.db {
+        if let Err(e) = db
+            .record_feedback(
+                &req.repo,
+                &req.file_path,
+                &req.issue_title,
+                &req.feedback_type,
+                req.reason.as_deref(),
+            )
+            .await
+        {
+            error!("Failed to record feedback to db: {:?}", e);
+        }
+    }
+
+    // 2. Update in-memory reviews state
+    let mut reviews = state.reviews.write().await;
+    for review in reviews.iter_mut() {
+        if req.review_id.as_deref() == Some(&review.id) || review.repo == req.repo {
+            for finding in review.findings.iter_mut() {
+                if finding.file == req.file_path && finding.title == req.issue_title {
+                    finding.feedback = Some(req.feedback_type.clone());
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "success",
+            "message": format!("Feedback '{}' recorded for {}", req.feedback_type, req.issue_title)
+        })),
+    )
+}
+
+async fn get_available_skills() -> impl IntoResponse {
+    let skills_dir = crate::skills::find_skills_dir(None);
+    let skills = crate::skills::list_all_skills(skills_dir.as_deref());
+    Json(serde_json::json!({
+        "skills_dir": skills_dir,
+        "skills": skills
+    }))
+}
+
 async fn trigger_review(
     State(state): State<Arc<ServerState>>,
     Json(req): Json<TriggerRequest>,
@@ -466,6 +533,7 @@ fn seed_initial_reviews() -> Vec<ReviewRecord> {
                     body: "Systemd ProtectHome='read-only' prevents antigravity-cli from persisting auth state. Add ReadWritePaths = [ '/home/${cfg.user}/.gemini' ] to systemd service configuration.".to_string(),
                     snippet: Some("systemd.services.revue.serviceConfig = {\n  ProtectHome = \"read-only\";\n+ ReadWritePaths = [ \"/home/${cfg.user}/.gemini\" ];\n};".to_string()),
                     confidence: Some(9),
+                    feedback: None,
                 },
                 Finding {
                     file: "nix/inventory.nix".to_string(),
@@ -475,6 +543,7 @@ fn seed_initial_reviews() -> Vec<ReviewRecord> {
                     body: "revue.kleinbem.dev routes to nixos-nvme:8383 over WireGuard wt0 interface. Verify port 8383 is permitted in networking.firewall.interfaces.wt0.allowedTCPPorts.".to_string(),
                     snippet: None,
                     confidence: Some(10),
+                    feedback: None,
                 },
             ],
         },
@@ -500,6 +569,7 @@ fn seed_initial_reviews() -> Vec<ReviewRecord> {
                     body: "Updated revue repo remote URL. Conductor sync clean.".to_string(),
                     snippet: Some("- nix-revue = \"git@github.com:kleinbem-dev/nix-revue.git\";\n+ revue = \"git@github.com:kleinbem-dev/revue.git\";".to_string()),
                     confidence: Some(10),
+                    feedback: None,
                 },
             ],
         },
@@ -579,6 +649,8 @@ pub async fn run_daemon(
         .route("/api/status", get(get_status))
         .route("/api/reviews", get(get_reviews))
         .route("/api/trigger", post(trigger_review))
+        .route("/api/feedback", post(record_finding_feedback))
+        .route("/api/skills", get(get_available_skills))
         .layer(cors)
         .with_state(state.clone());
 

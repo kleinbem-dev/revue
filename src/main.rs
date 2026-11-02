@@ -12,6 +12,7 @@ pub mod providers;
 pub mod reviewer;
 pub mod scrubber;
 pub mod server;
+pub mod skills;
 
 #[derive(Parser, Debug)]
 #[command(

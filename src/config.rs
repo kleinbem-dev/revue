@@ -131,6 +131,8 @@ pub struct ReviewSection {
     #[serde(default)]
     pub ignore: Vec<String>,
     #[serde(default)]
+    pub skills_dir: Option<String>,
+    #[serde(default)]
     pub rules: Vec<PathRule>,
 }
 
@@ -170,6 +172,7 @@ impl Default for ReviewSection {
                 "**/package-lock.json".to_string(),
             ],
             rules: Vec::new(),
+            skills_dir: None,
         }
     }
 }
