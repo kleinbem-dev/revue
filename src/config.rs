@@ -30,6 +30,9 @@ pub struct ForgeConfig {
     /// Access token (overridden by FORGEJO_TOKEN / GITHUB_TOKEN if empty)
     #[serde(default)]
     pub token: Option<String>,
+    /// Webhook HMAC secret for signature verification (overridden by REVUE_WEBHOOK_SECRET)
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 fn default_forge_type() -> String {
@@ -45,7 +48,10 @@ impl Default for ForgeConfig {
         Self {
             r#type: default_forge_type(),
             url: default_forge_url(),
-            token: std::env::var("FORGEJO_TOKEN").ok(),
+            token: std::env::var("FORGEJO_TOKEN")
+                .or_else(|_| std::env::var("GITHUB_TOKEN"))
+                .ok(),
+            webhook_secret: std::env::var("REVUE_WEBHOOK_SECRET").ok(),
         }
     }
 }
@@ -208,6 +214,10 @@ impl RevueConfig {
                 .ok();
         }
 
+        if cfg.forge.webhook_secret.is_none() {
+            cfg.forge.webhook_secret = std::env::var("REVUE_WEBHOOK_SECRET").ok();
+        }
+
         Ok(cfg)
     }
 
@@ -280,6 +290,8 @@ forge:
   type: auto
   # Base URL for Forgejo (used when forge is self-hosted)
   url: "https://git.kleinbem.dev"
+  # Webhook HMAC secret for signature verification (or set REVUE_WEBHOOK_SECRET)
+  # webhook_secret: "your-shared-secret"
 
 # Multi-model provider cascade (primary -> fallback 1 -> fallback 2)
 providers:

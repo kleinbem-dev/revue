@@ -64,6 +64,10 @@ enum Commands {
         /// Address to bind the HTTP webhook listener
         #[arg(short, long, default_value = "0.0.0.0:8383")]
         listen: String,
+
+        /// Webhook HMAC secret for signature verification (or set REVUE_WEBHOOK_SECRET)
+        #[arg(long, env = "REVUE_WEBHOOK_SECRET")]
+        webhook_secret: Option<String>,
     },
 }
 
@@ -94,9 +98,9 @@ async fn main() -> Result<()> {
         Commands::Pr { index, repo, dry_run } => {
             reviewer::run_pr_review(index, repo.as_deref(), dry_run, cli.config.as_deref()).await?;
         }
-        Commands::Daemon { listen } => {
+        Commands::Daemon { listen, webhook_secret } => {
             info!("Starting nix-revue daemon");
-            server::run_daemon(&listen, cli.config.as_deref()).await?;
+            server::run_daemon(&listen, cli.config.as_deref(), webhook_secret.as_deref()).await?;
         }
     }
 
