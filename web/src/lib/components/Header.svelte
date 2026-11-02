@@ -1,5 +1,13 @@
 <script lang="ts">
-	let { version = '0.1.0' }: { version?: string } = $props();
+	let {
+		version = '0.1.0',
+		activeTab = 'dashboard',
+		onTabChange
+	}: {
+		version?: string;
+		activeTab?: 'dashboard' | 'wizard';
+		onTabChange?: (tab: 'dashboard' | 'wizard') => void;
+	} = $props();
 </script>
 
 <header class="header">
@@ -11,6 +19,27 @@
 		</div>
 		<span class="tagline">Self-hosted, forge-agnostic AI code review</span>
 	</div>
+
+	<!-- Navigation Tabs -->
+	<nav class="nav-tabs">
+		<button
+			class="nav-tab"
+			class:active={activeTab === 'dashboard'}
+			onclick={() => onTabChange?.('dashboard')}
+		>
+			<span class="tab-icon">📊</span>
+			<span>Triage & Reviews</span>
+		</button>
+
+		<button
+			class="nav-tab"
+			class:active={activeTab === 'wizard'}
+			onclick={() => onTabChange?.('wizard')}
+		>
+			<span class="tab-icon">🥕</span>
+			<span>Rules & Config Wizard</span>
+		</button>
+	</nav>
 
 	<div class="header-actions">
 		<a
@@ -43,13 +72,15 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		padding: 1.25rem 2rem;
-		border-bottom: 1px solid var(--border-color, #1e293b);
-		background: rgba(15, 23, 42, 0.75);
+		padding: 1rem 2rem;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+		background: #0f131a;
 		backdrop-filter: blur(12px);
 		position: sticky;
 		top: 0;
 		z-index: 50;
+		flex-wrap: wrap;
+		gap: 1rem;
 	}
 
 	.logo-area {
@@ -91,9 +122,49 @@
 
 	.tagline {
 		color: #64748b;
-		font-size: 0.875rem;
+		font-size: 0.85rem;
 		padding-left: 0.75rem;
 		border-left: 1px solid #334155;
+	}
+
+	/* Navigation Tabs */
+	.nav-tabs {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		background: #161b22;
+		padding: 0.25rem;
+		border-radius: 0.6rem;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+	}
+
+	.nav-tab {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.45rem 0.95rem;
+		border-radius: 0.45rem;
+		font-size: 0.825rem;
+		font-weight: 600;
+		color: #8b949e;
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.nav-tab:hover {
+		color: #f0f6fc;
+	}
+
+	.nav-tab.active {
+		background: #21262d;
+		color: #f97316;
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+	}
+
+	.tab-icon {
+		font-size: 0.95rem;
 	}
 
 	.header-actions {
@@ -134,7 +205,7 @@
 		box-shadow: 0 0 6px #10b981;
 	}
 
-	@media (max-width: 640px) {
+	@media (max-width: 900px) {
 		.tagline {
 			display: none;
 		}

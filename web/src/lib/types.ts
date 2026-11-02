@@ -8,6 +8,8 @@ export interface Finding {
 	body: string;
 	confidence?: number;
 	snippet?: string;
+	category?: string;
+	committable_patch?: string;
 }
 
 export interface ReviewRecord {
@@ -25,6 +27,11 @@ export interface ReviewRecord {
 	pass2_verified: number;
 	summary: string;
 	findings: Finding[];
+	lines_added?: number;
+	lines_removed?: number;
+	executive_summary?: string;
+	triage_status?: 'now' | 'next';
+	risk_level?: 'low' | 'medium' | 'high';
 }
 
 export interface ProviderStatus {
@@ -44,4 +51,16 @@ export interface DaemonMetrics {
 	verified_findings: number;
 	avg_cost_saved: string;
 	uptime: string;
+}
+
+export interface WizardConfig {
+	profile: 'quiet' | 'chill' | 'assertive';
+	auto_approvals: boolean;
+	max_merge_risk: 'low' | 'medium' | 'high';
+	high_level_summary: boolean;
+	anti_slop: boolean;
+	ignore_lockfiles: boolean;
+	ignore_vendor: boolean;
+	ignore_generated: boolean;
+	custom_guidelines: string;
 }

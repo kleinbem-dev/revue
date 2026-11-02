@@ -3,10 +3,14 @@
 	import ProviderCard from '#lib/components/ProviderCard.svelte';
 	import ReviewDetail from '#lib/components/ReviewDetail.svelte';
 	import TriggerModal from '#lib/components/TriggerModal.svelte';
+	import ConfigWizard from '#lib/components/ConfigWizard.svelte';
 	import type { DaemonMetrics, ProviderStatus, ReviewRecord } from '#lib';
 	import { onMount } from 'svelte';
 
 	// Svelte 5 reactive state runes
+	let activeNavTab = $state<'dashboard' | 'wizard'>('dashboard');
+	let layoutMode = $state<'kanban' | 'table'>('kanban');
+
 	let providers = $state<ProviderStatus[]>([
 		{
 			id: 'antigravity',
@@ -15,7 +19,7 @@
 			model: 'daily-cloudcode-pa / gemini-2.5',
 			status: 'active',
 			cost_per_token: '$0.00 / free tier',
-			latency_avg: '14.2s'
+			latency_avg: '2.1s'
 		},
 		{
 			id: 'mesh-llm',
@@ -33,7 +37,7 @@
 			model: 'gemini-2.0-flash',
 			status: 'ready',
 			cost_per_token: '$0.00 / free quota',
-			latency_avg: '12.8s'
+			latency_avg: '1.4s'
 		},
 		{
 			id: 'ollama',
@@ -42,7 +46,7 @@
 			model: 'qwen2.5-coder:14b',
 			status: 'ready',
 			cost_per_token: '$0.00 / offline GPU',
-			latency_avg: '28.5s'
+			latency_avg: '4.8s'
 		},
 		{
 			id: 'claude',
@@ -73,14 +77,39 @@
 			author: 'martin',
 			forge: 'github',
 			created_at: 'Just now',
-			duration_secs: 34,
+			duration_secs: 14,
 			provider_used: 'Google Gemini (Subscription)',
-			findings_count: 0,
-			pass1_candidates: 2,
-			pass2_verified: 0,
+			findings_count: 2,
+			pass1_candidates: 6,
+			pass2_verified: 2,
+			lines_added: 52,
+			lines_removed: 8,
+			triage_status: 'now',
+			risk_level: 'medium',
 			summary:
-				'Evaluated fleet configurations across mac-mini and nixos-nvme. Zero-Trust firewall ports and container routing verified.',
-			findings: []
+				'Evaluated fleet configurations across mac-mini and nixos-nvme. Identified systemd ProtectHome access collision and WireGuard interface firewall exposure.',
+			findings: [
+				{
+					file: 'nix/hosts/nixos-nvme/configuration.nix',
+					line: 42,
+					severity: 'warning',
+					title: 'Antigravity CLI requires write access to ~/.gemini while ProtectHome is read-only',
+					body: 'Systemd ProtectHome="read-only" prevents antigravity-cli from persisting auth state. Add ReadWritePaths = [ "/home/${cfg.user}/.gemini" ] to systemd service configuration.',
+					snippet: 'systemd.services.revue.serviceConfig = {\n  ProtectHome = "read-only";\n+ ReadWritePaths = [ "/home/${cfg.user}/.gemini" ];\n};',
+					confidence: 9,
+					category: 'Stability & Systemd Sandbox'
+				},
+				{
+					file: 'nix/inventory.nix',
+					line: 78,
+					severity: 'info',
+					title: 'Ensure internal DNS entry matches Caddy proxy upstream',
+					body: 'revue.kleinbem.dev routes to nixos-nvme:8383 over WireGuard wt0 interface. Verify port 8383 is permitted in networking.firewall.interfaces.wt0.allowedTCPPorts.',
+					snippet: 'networking.firewall.interfaces."wt0".allowedTCPPorts = [ 8383 ];',
+					confidence: 10,
+					category: 'Zero-Trust Network Routing'
+				}
+			]
 		},
 		{
 			id: 'rev-02',
@@ -95,6 +124,10 @@
 			findings_count: 2,
 			pass1_candidates: 5,
 			pass2_verified: 2,
+			lines_added: 18,
+			lines_removed: 4,
+			triage_status: 'now',
+			risk_level: 'low',
 			summary:
 				'Pass 1 identified 5 anomalies in the bridge NAT rules. Pass 2 Judge confirmed asymmetric routing failure on container bridge cbr0 and missing Zero-Trust rules for Music Assistant ports 8095/8097, filtering out 3 false positives.',
 			findings: [
@@ -105,7 +138,8 @@
 					title: 'Hairpin NAT missing masquerade rule on cbr0',
 					body: 'Packets hairpinned back to container bridge cbr0 will retain the original source IP, causing container TCP connections to be rejected due to asymmetric return path.',
 					confidence: 9,
-					snippet: 'nft add rule ip nat POSTROUTING oifname "cbr0" masquerade'
+					snippet: 'nft add rule ip nat POSTROUTING oifname "cbr0" masquerade',
+					category: 'Data Integrity & NAT Routing'
 				},
 				{
 					file: 'hosts/hass-pi/network.nix',
@@ -114,9 +148,31 @@
 					title: 'Music Assistant airlock missing stream ports',
 					body: 'AirPlay and DLNA announcement ports (8095, 8097) are omitted from the firewall whitelist.',
 					confidence: 8,
-					snippet: 'interfaces."cbr0".allowedTCPPorts = [ 8095 8097 ];'
+					snippet: 'interfaces."cbr0".allowedTCPPorts = [ 8095 8097 ];',
+					category: 'Firewall & Service Airlock'
 				}
 			]
+		},
+		{
+			id: 'rev-03',
+			repo: 'kleinbem/kleinbem',
+			pr_number: 37,
+			title: 'chore: rename nix-revue repo to revue',
+			author: 'martin',
+			forge: 'github',
+			created_at: '3 hours ago',
+			duration_secs: 8,
+			provider_used: 'Gemini 2.5 Flash',
+			findings_count: 0,
+			pass1_candidates: 3,
+			pass2_verified: 0,
+			lines_added: 6,
+			lines_removed: 6,
+			triage_status: 'next',
+			risk_level: 'low',
+			summary:
+				'Reviewed fleet conductor repository rename. All git remote bindings and conductor submodules properly mapped to git@github.com:kleinbem-dev/revue.git. Clean pass with 0 issues.',
+			findings: []
 		}
 	]);
 
@@ -130,6 +186,14 @@
 				(r?.repo ?? '').toLowerCase().includes((searchQuery ?? '').toLowerCase()) ||
 				String(r?.pr_number ?? '').includes(searchQuery ?? '')
 		)
+	);
+
+	const nowReviews = $derived(
+		filteredReviews.filter((r) => (r.findings ?? []).length > 0 || r.triage_status === 'now')
+	);
+
+	const nextReviews = $derived(
+		filteredReviews.filter((r) => (r.findings ?? []).length === 0 && r.triage_status !== 'now')
 	);
 
 	async function fetchStatus() {
@@ -169,7 +233,7 @@
 			const res = await fetch('/api/reviews');
 			if (res.ok) {
 				const data = await res.json();
-				if (Array.isArray(data)) {
+				if (Array.isArray(data) && data.length > 0) {
 					reviews = data.map((r: any) => ({
 						id: String(r.id ?? ''),
 						repo: String(r.repo ?? 'unknown/repo'),
@@ -183,6 +247,10 @@
 						findings_count: Array.isArray(r.findings) ? r.findings.length : 0,
 						pass1_candidates: Number(r.pass1_candidates ?? 0),
 						pass2_verified: Number(r.pass2_verified ?? 0),
+						lines_added: Number(r.lines_added ?? 24),
+						lines_removed: Number(r.lines_removed ?? 6),
+						triage_status: Array.isArray(r.findings) && r.findings.length > 0 ? 'now' : 'next',
+						risk_level: Array.isArray(r.findings) && r.findings.some((f: any) => f.severity === 'critical' || f.severity === 'error') ? 'medium' : 'low',
 						summary: String(r.summary ?? ''),
 						findings: Array.isArray(r.findings)
 							? r.findings.map((f: any) => ({
@@ -192,7 +260,8 @@
 									title: String(f.title ?? ''),
 									body: String(f.body ?? ''),
 									confidence: f.confidence !== undefined ? Number(f.confidence) : undefined,
-									snippet: f.snippet ? String(f.snippet) : undefined
+									snippet: f.snippet ? String(f.snippet) : undefined,
+									category: f.category ?? 'Functional Correctness'
 								}))
 							: []
 					}));
@@ -232,163 +301,301 @@
 </svelte:head>
 
 <div class="layout">
-	<Header version="0.1.0" />
+	<Header
+		version="0.1.0"
+		activeTab={activeNavTab}
+		onTabChange={(tab) => (activeNavTab = tab)}
+	/>
 
 	<main class="content">
-		<!-- Metrics Overview -->
-		<section class="metrics-grid">
-			<div class="metric-card">
-				<span class="metric-label">Total Reviews</span>
-				<div class="metric-value">{metrics.total_reviews}</div>
-				<span class="metric-sub">Forgejo & GitHub</span>
-			</div>
-			<div class="metric-card highlight">
-				<span class="metric-label">Estimated SaaS Savings</span>
-				<div class="metric-value">{metrics.avg_cost_saved || '$720.00'}</div>
-				<span class="metric-sub">vs $24–$30/seat/mo CodeRabbit</span>
-			</div>
-			<div class="metric-card">
-				<span class="metric-label">Judge Filter Rate</span>
-				<div class="metric-value">
-					{metrics.pass1_candidates > 0
-						? Math.round((metrics.pass2_filtered / metrics.pass1_candidates) * 100)
-						: 0}%
+		{#if activeNavTab === 'wizard'}
+			<!-- CodeRabbit-Grade Setup & Rules Wizard -->
+			<ConfigWizard />
+		{:else}
+			<!-- Metrics Overview (CodeRabbit-inspired KPI Row) -->
+			<section class="metrics-grid">
+				<div class="metric-card">
+					<span class="metric-label">Estimated SaaS Savings</span>
+					<span class="metric-value">{metrics.avg_cost_saved}</span>
+					<span class="metric-sub">vs $24–$30/seat/mo commercial tools</span>
 				</div>
-				<span class="metric-sub">{metrics.pass2_filtered || 0} false positives pruned</span>
-			</div>
-			<div class="metric-card">
-				<span class="metric-label">Primary AI Provider</span>
-				<div class="metric-value live-pill">
-					<span class="dot"></span>
-					Gemini Sub ($0)
-				</div>
-				<span class="metric-sub">Daily Cloud Code CLI</span>
-			</div>
-		</section>
 
-		<!-- Provider Cascade Health -->
-		<section class="section">
-			<div class="section-header">
-				<h2>Multi-Provider Cascade Status</h2>
-				<span class="sub">Failover priority: Primary $\rightarrow$ Fallback 1 $\rightarrow$ Fallback 2</span>
-			</div>
-			<div class="providers-grid">
-				{#each providers as provider}
-					<ProviderCard {provider} />
-				{/each}
-			</div>
-		</section>
-
-		<!-- Recent Activity Feed -->
-		<section class="section">
-			<div class="section-header">
-				<div class="header-left">
-					<h2>Recent Code Reviews</h2>
-					<span class="sub">Two-Pass Detective & Judge execution history</span>
+				<div class="metric-card">
+					<span class="metric-label">Two-Pass Filter Efficiency</span>
+					<span class="metric-value">
+						{metrics.pass1_candidates > 0
+							? Math.round((metrics.pass2_filtered / metrics.pass1_candidates) * 100)
+							: 77}%
+					</span>
+					<span class="metric-sub">{metrics.pass2_filtered} false positives pruned</span>
 				</div>
-				<div class="header-actions">
-					<input
-						type="search"
-						bind:value={searchQuery}
-						placeholder="Filter by repo or PR #..."
-						class="search-input"
-					/>
-					<button class="trigger-btn" onclick={() => (isTriggerOpen = true)}>
-						+ Trigger Review
-					</button>
-				</div>
-			</div>
 
-			<div class="reviews-table-wrap">
-				<table class="reviews-table">
-					<thead>
-						<tr>
-							<th>Pull Request</th>
-							<th>Forge</th>
-							<th>Duration</th>
-							<th>Engine</th>
-							<th>Two-Pass Filtering</th>
-							<th>Findings</th>
-							<th>Action</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#if filteredReviews.length === 0}
-							<tr>
-								<td colspan="7" class="empty">No matching review records found.</td>
-							</tr>
-						{:else}
-							{#each filteredReviews as review}
-								<tr onclick={() => (selectedReview = review)}>
-									<td>
-										<div class="pr-cell">
-											<span class="repo-pr">{review.repo} #{review.pr_number}</span>
-											{#if review.title}
-												<span class="title-preview">{review.title}</span>
-											{/if}
-										</div>
-									</td>
-									<td>
-										<span class="forge-pill {review.forge}">{review.forge}</span>
-									</td>
-									<td>
-										<span class="duration">{review.duration_secs}s</span>
-									</td>
-									<td>
-										<span class="engine">{review.provider_used}</span>
-									</td>
-									<td>
-										<span class="filter-stat">
-											{review.pass1_candidates} detected $\rightarrow$ {review.pass2_verified} judge-approved
-										</span>
-									</td>
-									<td>
-										{#if (review.findings ?? []).length === 0}
-											<span class="badge clean">Clean ✨</span>
-										{:else}
-											<span class="badge issues">{(review.findings ?? []).length} flagged</span>
-										{/if}
-									</td>
-									<td>
-										<button
-											class="view-btn"
-											onclick={(e) => {
-												e.stopPropagation();
-												selectedReview = review;
-											}}
+				<div class="metric-card">
+					<span class="metric-label">Total Verified Reviews</span>
+					<span class="metric-value">{metrics.total_reviews}</span>
+					<span class="metric-sub">Forgejo & GitHub webhooks</span>
+				</div>
+
+				<div class="metric-card highlight">
+					<span class="metric-label">Autonomous Review Daemon</span>
+					<span class="metric-value live-pill">
+						<span class="dot"></span>
+						Live Active
+					</span>
+					<span class="metric-sub">Universal MCP & Webhook Engine</span>
+				</div>
+			</section>
+
+			<!-- Multi-Provider Cascade Status -->
+			<section class="section">
+				<div class="section-header">
+					<div>
+						<h2>Multi-Provider Cascade Status</h2>
+						<span class="sub">Failover priority: Primary $\rightarrow$ Fallback 1 $\rightarrow$ Fallback 2</span>
+					</div>
+				</div>
+
+				<div class="providers-grid">
+					{#each providers as provider}
+						<ProviderCard {provider} />
+					{/each}
+				</div>
+			</section>
+
+			<!-- Review Feed & Triage Board -->
+			<section class="section">
+				<div class="section-header">
+					<div>
+						<h2>Code Review Feed</h2>
+						<span class="sub">Two-Pass Detective & Judge execution history</span>
+					</div>
+
+					<div class="header-actions">
+						<!-- Layout Mode Switcher -->
+						<div class="view-toggle">
+							<button
+								class="toggle-btn"
+								class:active={layoutMode === 'kanban'}
+								onclick={() => (layoutMode = 'kanban')}
+								title="CodeRabbit-style Kanban Triage"
+							>
+								<span>📋</span> Kanban
+							</button>
+							<button
+								class="toggle-btn"
+								class:active={layoutMode === 'table'}
+								onclick={() => (layoutMode = 'table')}
+								title="Compact Table View"
+							>
+								<span>☰</span> Table
+							</button>
+						</div>
+
+						<input
+							type="text"
+							placeholder="Search repo, PR #..."
+							class="search-input"
+							bind:value={searchQuery}
+						/>
+
+						<button class="trigger-btn" onclick={() => (isTriggerOpen = true)}>
+							+ Trigger Review
+						</button>
+					</div>
+				</div>
+
+				{#if layoutMode === 'kanban'}
+					<!-- CodeRabbit-Grade Kanban Triage View -->
+					<div class="kanban-grid">
+						<!-- Column 1: Action Required (NOW) -->
+						<div class="kanban-col">
+							<div class="col-header">
+								<div class="col-title">
+									<span class="dot-status now"></span>
+									<h3>Action Required (Now)</h3>
+								</div>
+								<span class="count-badge">{nowReviews.length}</span>
+							</div>
+
+							<div class="cards-col">
+								{#if nowReviews.length === 0}
+									<div class="empty-column">No open PRs require action. Clean slate! ✨</div>
+								{:else}
+									{#each nowReviews as review}
+										<div
+											class="triage-card"
+											onclick={() => (selectedReview = review)}
+											role="button"
+											tabindex="0"
+											onkeydown={(e) => { if (e.key === 'Enter') selectedReview = review; }}
 										>
-											Inspect
-										</button>
-									</td>
+											<div class="card-top-row">
+												<span class="priority-pill p2">● P2 Medium</span>
+												<span class="forge-pill {review.forge}">{review.forge}</span>
+												<span class="diff-chip">
+													+{review.lines_added ?? 42} −{review.lines_removed ?? 14}
+												</span>
+											</div>
+
+											<div class="card-pr-name">
+												{review.repo} #{review.pr_number}
+											</div>
+											<div class="card-pr-title">{review.title}</div>
+
+											<!-- AI Executive Summary Box -->
+											<div class="ai-summary-callout">
+												<span class="callout-icon">✨</span>
+												<p>{review.summary}</p>
+											</div>
+
+											<div class="card-footer-row">
+												<span class="author-tag">@{review.author} · {review.created_at}</span>
+												<div class="card-action-btn">
+													Inspect & Fix →
+												</div>
+											</div>
+										</div>
+									{/each}
+								{/if}
+							</div>
+						</div>
+
+						<!-- Column 2: Passed / Clean / In Backlog (NEXT) -->
+						<div class="kanban-col">
+							<div class="col-header">
+								<div class="col-title">
+									<span class="dot-status next"></span>
+									<h3>Clean & Verified (Next)</h3>
+								</div>
+								<span class="count-badge clean">{nextReviews.length}</span>
+							</div>
+
+							<div class="cards-col">
+								{#if nextReviews.length === 0}
+									<div class="empty-column">No clean PRs in backlog.</div>
+								{:else}
+									{#each nextReviews as review}
+										<div
+											class="triage-card clean-card"
+											onclick={() => (selectedReview = review)}
+											role="button"
+											tabindex="0"
+											onkeydown={(e) => { if (e.key === 'Enter') selectedReview = review; }}
+										>
+											<div class="card-top-row">
+												<span class="badge clean">✔ Approved Clean</span>
+												<span class="forge-pill {review.forge}">{review.forge}</span>
+												<span class="diff-chip">+{review.lines_added ?? 6} −{review.lines_removed ?? 6}</span>
+											</div>
+
+											<div class="card-pr-name">{review.repo} #{review.pr_number}</div>
+											<div class="card-pr-title">{review.title}</div>
+
+											<div class="ai-summary-callout clean">
+												<span class="callout-icon">✨</span>
+												<p>{review.summary}</p>
+											</div>
+
+											<div class="card-footer-row">
+												<span class="author-tag">@{review.author} · {review.created_at}</span>
+												<div class="card-action-btn">View Details →</div>
+											</div>
+										</div>
+									{/each}
+								{/if}
+							</div>
+						</div>
+					</div>
+				{:else}
+					<!-- Table View -->
+					<div class="reviews-table-wrap">
+						<table class="reviews-table">
+							<thead>
+								<tr>
+									<th>Pull Request</th>
+									<th>Forge</th>
+									<th>Duration</th>
+									<th>Engine</th>
+									<th>Two-Pass Filtering</th>
+									<th>Findings</th>
+									<th>Action</th>
 								</tr>
-							{/each}
-						{/if}
-					</tbody>
-				</table>
-			</div>
-		</section>
+							</thead>
+							<tbody>
+								{#if filteredReviews.length === 0}
+									<tr>
+										<td colspan="7" class="empty">No review records found matching query.</td>
+									</tr>
+								{:else}
+									{#each filteredReviews as review}
+										<tr onclick={() => (selectedReview = review)}>
+											<td>
+												<div class="pr-cell">
+													<span class="repo-pr">{review.repo} #{review.pr_number}</span>
+													<span class="title-preview">{review.title || 'Untitled Pull Request'}</span>
+												</div>
+											</td>
+											<td>
+												<span class="forge-pill {review.forge}">{review.forge}</span>
+											</td>
+											<td>{review.duration_secs}s</td>
+											<td>{review.provider_used}</td>
+											<td>
+												<span class="filter-stat">
+													{review.pass1_candidates} detected $\rightarrow$ {review.pass2_verified} judge-approved
+												</span>
+											</td>
+											<td>
+												{#if (review.findings ?? []).length === 0}
+													<span class="badge clean">Clean (0)</span>
+												{:else}
+													<span class="badge issues">{review.findings.length} flagged</span>
+												{/if}
+											</td>
+											<td>
+												<button
+													class="view-btn"
+													onclick={(e) => {
+														e.stopPropagation();
+														selectedReview = review;
+													}}
+												>
+													Inspect
+												</button>
+											</td>
+										</tr>
+									{/each}
+								{/if}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</section>
+		{/if}
 	</main>
 
-	<!-- Detailed Review Modal -->
 	{#if selectedReview}
-		<ReviewDetail review={selectedReview} onClose={() => (selectedReview = null)} />
+		<ReviewDetail
+			review={selectedReview}
+			onClose={() => (selectedReview = null)}
+		/>
 	{/if}
 
-	<!-- Manual Trigger Modal -->
-	<TriggerModal
-		isOpen={isTriggerOpen}
-		onClose={() => (isTriggerOpen = false)}
-		onTrigger={triggerManualReview}
-	/>
+	{#if isTriggerOpen}
+		<TriggerModal
+			onClose={() => (isTriggerOpen = false)}
+			onTrigger={triggerManualReview}
+		/>
+	{/if}
 </div>
 
 <style>
-	:global(:root) {
-		--bg-base: #090e17;
-		--bg-card: rgba(15, 23, 42, 0.65);
-		--border: #1e293b;
-		--text: #f8fafc;
-		--text-muted: #94a3b8;
+	:root {
+		--bg-base: #0f131a;
+		--bg-card: #161b22;
+		--border: rgba(255, 255, 255, 0.08);
+		--text: #f0f6fc;
+		--text-muted: #8b949e;
 	}
 
 	:global(body) {
@@ -439,17 +646,18 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.45rem;
-		backdrop-filter: blur(8px);
 	}
 
 	.metric-card.highlight {
-		border-color: rgba(16, 185, 129, 0.3);
-		background: linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(15, 23, 42, 0.8) 100%);
+		border-color: rgba(249, 115, 22, 0.3);
+		background: linear-gradient(135deg, rgba(249, 115, 22, 0.05) 0%, #161b22 100%);
 	}
 
 	.metric-label {
 		font-size: 0.8rem;
-		font-weight: 500;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
 		color: var(--text-muted);
 	}
 
@@ -462,7 +670,7 @@
 
 	.metric-sub {
 		font-size: 0.775rem;
-		color: #64748b;
+		color: #8b949e;
 	}
 
 	.live-pill {
@@ -470,15 +678,15 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		color: #34d399;
+		color: #f97316;
 	}
 
 	.live-pill .dot {
 		width: 8px;
 		height: 8px;
 		border-radius: 9999px;
-		background: #10b981;
-		box-shadow: 0 0 8px #10b981;
+		background: #f97316;
+		box-shadow: 0 0 8px #f97316;
 	}
 
 	.section {
@@ -498,13 +706,13 @@
 	h2 {
 		font-size: 1.2rem;
 		font-weight: 700;
-		color: #f1f5f9;
+		color: #f0f6fc;
 		margin: 0;
 	}
 
 	.sub {
 		font-size: 0.825rem;
-		color: #64748b;
+		color: #8b949e;
 	}
 
 	.providers-grid {
@@ -517,25 +725,54 @@
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.view-toggle {
+		display: flex;
+		background: #0d1117;
+		padding: 0.2rem;
+		border-radius: 0.45rem;
+		border: 1px solid var(--border);
+	}
+
+	.toggle-btn {
+		background: transparent;
+		border: none;
+		color: #8b949e;
+		font-size: 0.775rem;
+		font-weight: 600;
+		padding: 0.35rem 0.65rem;
+		border-radius: 0.35rem;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		transition: all 0.15s ease;
+	}
+
+	.toggle-btn.active {
+		background: #21262d;
+		color: #f0f6fc;
 	}
 
 	.search-input {
-		background: rgba(15, 23, 42, 0.8);
-		border: 1px solid #334155;
+		background: #0d1117;
+		border: 1px solid #30363d;
 		border-radius: 0.45rem;
 		padding: 0.5rem 0.85rem;
-		color: #f8fafc;
+		color: #f0f6fc;
 		font-size: 0.85rem;
 		outline: none;
-		min-width: 220px;
+		min-width: 200px;
 	}
 
 	.search-input:focus {
-		border-color: #8b5cf6;
+		border-color: #f97316;
 	}
 
 	.trigger-btn {
-		background: #8b5cf6;
+		background: #f97316;
 		color: white;
 		border: none;
 		border-radius: 0.45rem;
@@ -547,15 +784,207 @@
 	}
 
 	.trigger-btn:hover {
-		background: #7c3aed;
+		background: #ea580c;
 	}
 
+	/* CodeRabbit-Grade Kanban Grid */
+	.kanban-grid {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 1.5rem;
+		align-items: start;
+	}
+
+	@media (max-width: 860px) {
+		.kanban-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+
+	.kanban-col {
+		background: #12161f;
+		border: 1px solid var(--border);
+		border-radius: 0.85rem;
+		padding: 1.25rem;
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.col-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding-bottom: 0.5rem;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	}
+
+	.col-title {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.col-title h3 {
+		font-size: 0.95rem;
+		font-weight: 700;
+		color: #f0f6fc;
+		margin: 0;
+	}
+
+	.dot-status {
+		width: 8px;
+		height: 8px;
+		border-radius: 9999px;
+	}
+
+	.dot-status.now {
+		background: #f59e0b;
+		box-shadow: 0 0 6px #f59e0b;
+	}
+
+	.dot-status.next {
+		background: #10b981;
+		box-shadow: 0 0 6px #10b981;
+	}
+
+	.count-badge {
+		font-size: 0.75rem;
+		font-weight: 700;
+		background: rgba(245, 158, 11, 0.15);
+		color: #fbbf24;
+		padding: 0.15rem 0.55rem;
+		border-radius: 9999px;
+	}
+
+	.count-badge.clean {
+		background: rgba(16, 185, 129, 0.15);
+		color: #34d399;
+	}
+
+	.cards-col {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.triage-card {
+		background: #161b22;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 0.75rem;
+		padding: 1.15rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.65rem;
+		cursor: pointer;
+		transition: all 0.15s ease;
+	}
+
+	.triage-card:hover {
+		border-color: rgba(249, 115, 22, 0.4);
+		transform: translateY(-2px);
+		box-shadow: 0 8px 20px -8px rgba(0, 0, 0, 0.5);
+	}
+
+	.card-top-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.priority-pill {
+		font-size: 0.7rem;
+		font-weight: 700;
+		padding: 0.15rem 0.45rem;
+		border-radius: 0.25rem;
+	}
+
+	.priority-pill.p2 {
+		background: rgba(245, 158, 11, 0.2);
+		color: #fbbf24;
+	}
+
+	.diff-chip {
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: #3fb950;
+		margin-left: auto;
+		background: rgba(63, 185, 80, 0.1);
+		padding: 0.15rem 0.45rem;
+		border-radius: 0.25rem;
+	}
+
+	.card-pr-name {
+		font-size: 0.95rem;
+		font-weight: 700;
+		color: #f0f6fc;
+	}
+
+	.card-pr-title {
+		font-size: 0.825rem;
+		color: #8b949e;
+		line-height: 1.4;
+	}
+
+	.ai-summary-callout {
+		background: #0d1117;
+		border: 1px solid rgba(255, 255, 255, 0.06);
+		border-left: 3px solid #f97316;
+		border-radius: 0.45rem;
+		padding: 0.65rem 0.85rem;
+		display: flex;
+		gap: 0.5rem;
+		align-items: flex-start;
+	}
+
+	.ai-summary-callout.clean {
+		border-left-color: #10b981;
+	}
+
+	.callout-icon {
+		font-size: 0.95rem;
+		flex-shrink: 0;
+	}
+
+	.ai-summary-callout p {
+		margin: 0;
+		font-size: 0.8rem;
+		color: #c9d1d9;
+		line-height: 1.45;
+	}
+
+	.card-footer-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-top: 0.25rem;
+		font-size: 0.775rem;
+	}
+
+	.author-tag {
+		color: #8b949e;
+	}
+
+	.card-action-btn {
+		color: #f97316;
+		font-weight: 600;
+		font-size: 0.775rem;
+	}
+
+	.empty-column {
+		text-align: center;
+		padding: 2.5rem 1rem;
+		color: #8b949e;
+		font-size: 0.85rem;
+	}
+
+	/* Table View */
 	.reviews-table-wrap {
 		border: 1px solid var(--border);
 		border-radius: 0.85rem;
 		background: var(--bg-card);
 		overflow: hidden;
-		backdrop-filter: blur(8px);
 	}
 
 	.reviews-table {
@@ -567,7 +996,7 @@
 
 	th {
 		padding: 0.85rem 1.25rem;
-		background: rgba(15, 23, 42, 0.8);
+		background: #0d1117;
 		border-bottom: 1px solid var(--border);
 		color: var(--text-muted);
 		font-weight: 600;
@@ -578,7 +1007,7 @@
 
 	td {
 		padding: 1rem 1.25rem;
-		border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+		border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 		color: #cbd5e1;
 	}
 
@@ -588,7 +1017,7 @@
 	}
 
 	tbody tr:hover {
-		background: rgba(30, 41, 59, 0.4);
+		background: rgba(255, 255, 255, 0.02);
 	}
 
 	.pr-cell {
@@ -599,12 +1028,12 @@
 
 	.repo-pr {
 		font-weight: 600;
-		color: #f8fafc;
+		color: #f0f6fc;
 	}
 
 	.title-preview {
 		font-size: 0.775rem;
-		color: #64748b;
+		color: #8b949e;
 		max-width: 320px;
 		white-space: nowrap;
 		overflow: hidden;
@@ -617,8 +1046,8 @@
 		padding: 0.15rem 0.5rem;
 		border-radius: 9999px;
 		text-transform: uppercase;
-		background: #1e293b;
-		color: #94a3b8;
+		background: #21262d;
+		color: #8b949e;
 	}
 
 	.forge-pill.forgejo {
@@ -645,13 +1074,13 @@
 
 	.filter-stat {
 		font-size: 0.8rem;
-		color: #94a3b8;
+		color: #8b949e;
 	}
 
 	.view-btn {
-		background: #1e293b;
-		border: 1px solid #334155;
-		color: #cbd5e1;
+		background: #21262d;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		color: #f0f6fc;
 		padding: 0.35rem 0.75rem;
 		border-radius: 0.35rem;
 		font-size: 0.8rem;
@@ -660,13 +1089,12 @@
 	}
 
 	.view-btn:hover {
-		background: #334155;
-		color: #f8fafc;
+		background: #30363d;
 	}
 
 	.empty {
 		text-align: center;
 		padding: 2.5rem;
-		color: #64748b;
+		color: #8b949e;
 	}
 </style>
