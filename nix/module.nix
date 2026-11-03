@@ -85,7 +85,10 @@ in
               DynamicUser = false;
               ProtectSystem = "strict";
               ProtectHome = "read-only";
-              ReadWritePaths = [ "/home/${cfg.user}/.gemini" ];
+              ReadWritePaths = [
+                "/home/${cfg.user}/.gemini"
+                "/home/${cfg.user}/.local/share/revue"
+              ];
               NoNewPrivileges = true;
               PrivateTmp = true;
               Environment = [
