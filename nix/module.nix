@@ -93,6 +93,7 @@ in
               PrivateTmp = true;
               Environment = [
                 "HOME=/home/${cfg.user}"
+                "REVUE_DATA_DIR=/home/${cfg.user}/.local/share/revue"
                 "PATH=/etc/profiles/per-user/${cfg.user}/bin:/run/current-system/sw/bin"
               ];
             }
