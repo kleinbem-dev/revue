@@ -9,6 +9,13 @@ permissions:
   contents: read
 
 jobs:
+  zizmor:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: kleinbem/actions/.github/workflows/zizmor.yaml@a1647881d0d61e4d5b299a054c3ec1e0ace1ebba # v1.2.2
+
   check:
     runs-on: ubuntu-latest
     steps:
