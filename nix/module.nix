@@ -55,6 +55,10 @@ in
   options.services.nix-revue = revueModuleOptions;
 
   config = lib.mkIf enabled {
+    systemd.tmpfiles.rules = lib.mkIf (cfg.user != null) [
+      "d /home/${cfg.user}/.local/share/revue 0750 ${cfg.user} ${if cfg.group != null then cfg.group else "users"} -"
+    ];
+
     systemd.services.revue = {
       description = "revue AI PR code review webhook daemon";
       after = [ "network.target" ];
