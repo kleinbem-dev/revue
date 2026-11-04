@@ -55,6 +55,10 @@ in
   options.services.nix-revue = revueModuleOptions;
 
   config = lib.mkIf enabled {
+    systemd.tmpfiles.rules = lib.mkIf (cfg.user != null) [
+      "d /home/${cfg.user}/.local/share/revue 0750 ${cfg.user} ${if cfg.group != null then cfg.group else "users"} -"
+    ];
+
     systemd.services.revue = {
       description = "revue AI PR code review webhook daemon";
       after = [ "network.target" ];
@@ -85,11 +89,15 @@ in
               DynamicUser = false;
               ProtectSystem = "strict";
               ProtectHome = "read-only";
-              ReadWritePaths = [ "/home/${cfg.user}/.gemini" ];
+              ReadWritePaths = [
+                "/home/${cfg.user}/.gemini"
+                "/home/${cfg.user}/.local/share/revue"
+              ];
               NoNewPrivileges = true;
               PrivateTmp = true;
               Environment = [
                 "HOME=/home/${cfg.user}"
+                "REVUE_DATA_DIR=/home/${cfg.user}/.local/share/revue"
                 "PATH=/etc/profiles/per-user/${cfg.user}/bin:/run/current-system/sw/bin"
               ];
             }
