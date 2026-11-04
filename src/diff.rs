@@ -12,6 +12,7 @@ pub struct FilePatch {
     pub new_path: String,
     pub hunks: Vec<DiffHunk>,
     pub valid_lines: HashSet<u64>,
+    pub added_lines: HashSet<u64>,
     pub raw_patch: String,
     pub file_context: Option<String>,
 }
@@ -42,6 +43,7 @@ impl ParsedDiff {
             };
 
             let mut valid_lines = HashSet::new();
+            let mut added_lines = HashSet::new();
             let mut hunks = Vec::new();
 
             for h in &p.hunks {
@@ -52,6 +54,7 @@ impl ParsedDiff {
                     match line {
                         patch::Line::Add(content) => {
                             valid_lines.insert(current_new_line);
+                            added_lines.insert(current_new_line);
                             hunk_lines.push(format!("+{}", content));
                             current_new_line += 1;
                         }
@@ -80,6 +83,7 @@ impl ParsedDiff {
                 new_path,
                 hunks,
                 valid_lines,
+                added_lines,
                 raw_patch: format!("{:?}", p),
                 file_context: None,
             });
@@ -160,6 +164,28 @@ impl ParsedDiff {
             .map(|f| f.valid_lines.contains(&line))
             .unwrap_or(false)
     }
+
+    /// Check if a proposed line is strictly an added line in the diff
+    pub fn is_added_line(&self, file_path: &str, line: u64) -> bool {
+        self.files
+            .iter()
+            .find(|f| f.new_path == file_path)
+            .map(|f| f.added_lines.contains(&line))
+            .unwrap_or(false)
+    }
+
+    /// Find the first added line within a span [start, end]
+    pub fn find_first_added_line_in_range(
+        &self,
+        file_path: &str,
+        start: u64,
+        end: u64,
+    ) -> Option<u64> {
+        self.files
+            .iter()
+            .find(|f| f.new_path == file_path)
+            .and_then(|f| (start..=end).find(|line| f.added_lines.contains(line)))
+    }
 }
 
 fn clean_diff_path(path: &str) -> String {
@@ -172,7 +198,6 @@ fn clean_diff_path(path: &str) -> String {
 fn clean_glob(pattern: &str) -> String {
     pattern.trim_start_matches('/').to_string()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -217,5 +242,28 @@ mod tests {
 
         assert_eq!(diff.files.len(), 1);
         assert_eq!(diff.files[0].new_path, "src/main.rs");
+    }
+
+    #[test]
+    fn test_added_lines_vs_context_lines() {
+        let diff = ParsedDiff::parse(SAMPLE_DIFF).expect("Diff parsing should succeed");
+        // Line 1 is context line: valid in file, but not an added line
+        assert!(diff.is_valid_line("src/main.rs", 1));
+        assert!(!diff.is_added_line("src/main.rs", 1));
+
+        // Line 2 and 3 are additions
+        assert!(diff.is_added_line("src/main.rs", 2));
+        assert!(diff.is_added_line("src/main.rs", 3));
+
+        // Range starting on context line 1 spans into addition on line 2
+        assert_eq!(
+            diff.find_first_added_line_in_range("src/main.rs", 1, 4),
+            Some(2)
+        );
+        // Range completely outside additions
+        assert_eq!(
+            diff.find_first_added_line_in_range("src/main.rs", 1, 1),
+            None
+        );
     }
 }

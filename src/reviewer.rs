@@ -8,6 +8,7 @@ use crate::providers::{
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::time::Duration;
 use tracing::info;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,7 +87,10 @@ fn format_diff_and_context(diff: &ParsedDiff) -> String {
         }
 
         if let Some(ctx) = &f.file_context {
-            out.push_str(&format!("\n[SURROUNDING FILE CONTEXT FOR {} (numbered lines)]:\n", f.new_path));
+            out.push_str(&format!(
+                "\n[SURROUNDING FILE CONTEXT FOR {} (numbered lines)]:\n",
+                f.new_path
+            ));
             out.push_str(ctx);
             out.push('\n');
         }
@@ -100,20 +104,288 @@ fn format_diff_and_context(diff: &ParsedDiff) -> String {
 fn get_skills_block(diff: &ParsedDiff, config: &RevueConfig) -> String {
     let changed_files: Vec<String> = diff.files.iter().map(|f| f.new_path.clone()).collect();
     let skills_dir = crate::skills::find_skills_dir(config.review.skills_dir.as_deref());
-    let matching_skills = crate::skills::find_matching_skills(skills_dir.as_deref(), &changed_files);
+    let matching_skills =
+        crate::skills::find_matching_skills(skills_dir.as_deref(), &changed_files);
     crate::skills::format_skills_for_prompt(&matching_skills)
 }
 
-pub fn generate_pass1_detective_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
+#[derive(Debug, Deserialize)]
+pub struct SemgrepOutput {
+    #[serde(default)]
+    pub results: Vec<SemgrepResult>,
+    #[serde(default)]
+    pub errors: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SemgrepResult {
+    pub check_id: String,
+    pub path: String,
+    pub start: SemgrepPosition,
+    #[serde(default)]
+    pub end: Option<SemgrepPosition>,
+    pub extra: SemgrepExtra,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SemgrepPosition {
+    pub line: u64,
+    #[serde(default)]
+    pub col: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SemgrepExtra {
+    pub message: String,
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub lines: Option<String>,
+    #[serde(default)]
+    pub fix: Option<String>,
+}
+
+pub fn parse_semgrep_results(raw_json: &str) -> Vec<ReviewIssue> {
+    parse_semgrep_findings_with_spans(raw_json)
+        .into_iter()
+        .map(|(issue, _)| issue)
+        .collect()
+}
+
+fn parse_semgrep_findings_with_spans(raw_json: &str) -> Vec<(ReviewIssue, Option<u64>)> {
+    let output = match serde_json::from_str::<SemgrepOutput>(raw_json) {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::warn!("Failed to deserialize Semgrep JSON output: {}", e);
+            return Vec::new();
+        }
+    };
+
+    if !output.errors.is_empty() {
+        tracing::warn!(
+            "Semgrep reported {} internal error(s) during scan: {:?}",
+            output.errors.len(),
+            output.errors
+        );
+    }
+
+    output
+        .results
+        .into_iter()
+        .map(|res| {
+            let severity = match res.extra.severity.to_uppercase().as_str() {
+                "ERROR" => {
+                    let id_lower = res.check_id.to_lowercase();
+                    if id_lower.contains("sec")
+                        || id_lower.contains("vuln")
+                        || id_lower.contains("cve")
+                    {
+                        "security".to_string()
+                    } else {
+                        "bug".to_string()
+                    }
+                }
+                "WARNING" => "warning".to_string(),
+                _ => "warning".to_string(),
+            };
+
+            let clean_path = res.path.strip_prefix("./").unwrap_or(&res.path).to_string();
+            let title = format!("AST Rule: {}", res.check_id);
+            let end_line = res.end.map(|e| e.line);
+            (
+                ReviewIssue {
+                    file: clean_path,
+                    line: res.start.line,
+                    severity,
+                    title,
+                    comment: crate::scrubber::scrub_diff(&res.extra.message).0,
+                    suggestion: res.extra.fix.map(|fix| crate::scrubber::scrub_diff(&fix).0),
+                },
+                end_line,
+            )
+        })
+        .collect()
+}
+
+pub async fn run_semgrep_pass0(
+    diff: &ParsedDiff,
+    config: &RevueConfig,
+    repo_path: Option<&std::path::Path>,
+) -> Vec<ReviewIssue> {
+    if !config.review.semgrep || diff.files.is_empty() {
+        return Vec::new();
+    }
+
+    let root = match repo_path {
+        Some(r) => r,
+        None => {
+            tracing::debug!("No local checkout path provided for Semgrep Pass 0; skipping");
+            return Vec::new();
+        }
+    };
+
+    let valid_targets: Vec<String> = diff
+        .files
+        .iter()
+        .map(|f| f.new_path.clone())
+        .filter(|p| root.join(p).is_file())
+        .collect();
+
+    if valid_targets.is_empty() {
+        tracing::debug!("No modified files found on disk for Semgrep Pass 0; skipping");
+        return Vec::new();
+    }
+
+    let config_arg = if let Some(cfg) = &config.review.semgrep_config {
+        Some(cfg.clone())
+    } else if root.join(".semgrep").exists() {
+        Some(root.join(".semgrep").to_string_lossy().to_string())
+    } else if root.join(".semgrep.yml").exists() {
+        Some(root.join(".semgrep.yml").to_string_lossy().to_string())
+    } else if root.join(".semgrep.yaml").exists() {
+        Some(root.join(".semgrep.yaml").to_string_lossy().to_string())
+    } else {
+        tracing::debug!(
+            "No Semgrep rules configuration (.semgrep/ or .semgrep.yml) found; skipping Pass 0"
+        );
+        return Vec::new();
+    };
+
+    let semgrep_bin = std::env::var("SEMGREP_BIN").unwrap_or_else(|_| "semgrep".to_string());
+
+    let mut cmd = tokio::process::Command::new(&semgrep_bin);
+    cmd.arg("scan")
+        .arg("--quiet")
+        .arg("--json")
+        .arg("--disable-version-check")
+        .arg("--metrics=off");
+
+    if let Some(cfg) = config_arg {
+        cmd.arg("--config").arg(cfg);
+    }
+
+    cmd.arg("--");
+    for target in &valid_targets {
+        cmd.arg(target);
+    }
+
+    cmd.current_dir(root).kill_on_drop(true);
+
+    let output = match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "semgrep binary '{}' not found in PATH; skipping Pass 0 AST scan",
+                    semgrep_bin
+                );
+            } else {
+                tracing::warn!("Failed to execute semgrep for Pass 0: {}", e);
+            }
+            return Vec::new();
+        }
+        Err(_) => {
+            tracing::warn!("Semgrep Pass 0 subprocess timed out after 30 seconds; skipping");
+            return Vec::new();
+        }
+    };
+
+    if !output.status.success() {
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "Semgrep Pass 0 exited with status {}; deterministic findings may be missing: {}",
+            output.status,
+            stderr_str.trim()
+        );
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let all_findings = parse_semgrep_findings_with_spans(&stdout_str);
+
+    let relevant_findings: Vec<ReviewIssue> = all_findings
+        .into_iter()
+        .filter_map(|(mut issue, end_line)| {
+            if diff.is_added_line(&issue.file, issue.line) {
+                Some(issue)
+            } else if let Some(end) = end_line {
+                if let Some(added) =
+                    diff.find_first_added_line_in_range(&issue.file, issue.line, end)
+                {
+                    issue.line = added;
+                    Some(issue)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !relevant_findings.is_empty() {
+        tracing::info!(
+            "Semgrep Pass 0 discovered {} deterministic AST rule violation(s) in diff",
+            relevant_findings.len()
+        );
+    }
+
+    relevant_findings
+}
+
+pub fn merge_pass0_findings(review: &mut ReviewOutput, pass0_issues: Vec<ReviewIssue>) {
+    if pass0_issues.is_empty() {
+        return;
+    }
+    for issue in pass0_issues {
+        let exists = review.issues.iter().any(|existing| {
+            existing.file == issue.file
+                && existing.line == issue.line
+                && (existing.title == issue.title
+                    || existing.comment.trim() == issue.comment.trim())
+        });
+        if !exists {
+            review.issues.push(issue);
+        }
+    }
+}
+
+pub fn generate_pass1_detective_prompt(
+    diff: &ParsedDiff,
+    config: &RevueConfig,
+    pass0_findings: &[ReviewIssue],
+) -> String {
     let mut rules_text = String::new();
     for rule in &config.review.rules {
-        rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
+        rules_text.push_str(&format!(
+            "- For files matching `{}`: {}\n",
+            rule.path, rule.instructions
+        ));
     }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
 
+    let mut pass0_text = String::new();
+    if !pass0_findings.is_empty() {
+        pass0_text.push_str("\nDETERMINISTIC AST RULES (PASS 0 FINDINGS):\n");
+        pass0_text.push_str("Static AST analysis (Semgrep) deterministically flagged the following rule violations in modified code:\n");
+        for finding in pass0_findings {
+            pass0_text.push_str(&format!(
+                "- [{}] `{}:{}` - {}: {}\n",
+                finding.severity.to_uppercase(),
+                finding.file,
+                finding.line,
+                finding.title,
+                finding.comment
+            ));
+            if let Some(sugg) = &finding.suggestion {
+                pass0_text.push_str(&format!("  Suggested Fix: {}\n", sugg.trim()));
+            }
+        }
+        pass0_text.push_str("Incorporate these verified findings into your analysis and investigate if any cascading or related defects exist.\n");
+    }
+
     format!(
-r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
+        r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
 
 You are an expert, highly investigative code detective.
 Your task is PASS 1: Broad Defect Discovery.
@@ -124,6 +396,7 @@ Discover all potential defects, edge cases, subtle logic bugs, security holes, c
 REPOSITORY RULES:
 {rules_text}
 {skills_text}
+{pass0_text}
 INSTRUCTIONS:
 1. Check how modified lines interact with the surrounding code (variable initializations, error returns, calling conventions).
 2. For every potential issue you spot, output a bullet point containing:
@@ -154,7 +427,10 @@ pub fn generate_pass2_judge_prompt(
         fp_text.push_str("\nPREVIOUSLY DISMISSED FALSE POSITIVES (DO NOT RE-FLAG THESE):\n");
         fp_text.push_str("The engineering team previously flagged and dismissed the following candidate issues as false alarms:\n");
         for item in false_positives {
-            fp_text.push_str(&format!("- In `{}`: \"{}\"", item.file_path, item.issue_title));
+            fp_text.push_str(&format!(
+                "- In `{}`: \"{}\"",
+                item.file_path, item.issue_title
+            ));
             if let Some(reason) = &item.reason {
                 fp_text.push_str(&format!(" (Reason: {})", reason));
             }
@@ -164,7 +440,7 @@ pub fn generate_pass2_judge_prompt(
     }
 
     format!(
-r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
+        r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
 
 You are a Senior Principal Engineer and Impartial Review Judge.
 Your task is PASS 2: Verification and Precision Filtering.
@@ -208,17 +484,43 @@ CODE UNDER REVIEW:
     )
 }
 
-pub fn generate_single_pass_prompt(diff: &ParsedDiff, config: &RevueConfig) -> String {
+pub fn generate_single_pass_prompt(
+    diff: &ParsedDiff,
+    config: &RevueConfig,
+    pass0_findings: &[ReviewIssue],
+) -> String {
     let tone = &config.review.tone;
     let mut rules_text = String::new();
     for rule in &config.review.rules {
-        rules_text.push_str(&format!("- For files matching `{}`: {}\n", rule.path, rule.instructions));
+        rules_text.push_str(&format!(
+            "- For files matching `{}`: {}\n",
+            rule.path, rule.instructions
+        ));
     }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
 
+    let mut pass0_text = String::new();
+    if !pass0_findings.is_empty() {
+        pass0_text.push_str("\nDETERMINISTIC AST RULES (PASS 0 FINDINGS):\n");
+        pass0_text.push_str("Static AST analysis (Semgrep) deterministically flagged the following rule violations in modified code:\n");
+        for finding in pass0_findings {
+            pass0_text.push_str(&format!(
+                "- [{}] `{}:{}` - {}: {}\n",
+                finding.severity.to_uppercase(),
+                finding.file,
+                finding.line,
+                finding.title,
+                finding.comment
+            ));
+            if let Some(sugg) = &finding.suggestion {
+                pass0_text.push_str(&format!("  Suggested Fix: {}\n", sugg.trim()));
+            }
+        }
+    }
+
     format!(
-r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
+        r#"IMPORTANT: Answer directly in text. Do NOT use any tools, shell commands, or file operations. Base your response purely on the provided diff and surrounding file context.
 
 You are an expert, highly critical code reviewer.
 Review the following git diff and output ONLY a valid JSON object matching the requested schema.
@@ -229,6 +531,7 @@ TONE INSTRUCTIONS:
 REPOSITORY-SPECIFIC RULES:
 {rules_text}
 {skills_text}
+{pass0_text}
 GENERAL GUIDELINES:
 1. Focus strictly on real bugs, security vulnerabilities, race conditions, edge cases, logic flaws, and breaking changes.
 2. DO NOT comment on formatting, whitespace, or minor stylistic nits that linters handle.
@@ -261,24 +564,41 @@ pub async fn execute_review_pipeline(
     config: &RevueConfig,
     chain: &ProviderChain,
     false_positives: &[crate::db::FindingFeedback],
+    repo_path: Option<&std::path::Path>,
 ) -> Result<(ReviewOutput, String)> {
+    let pass0_issues = if config.review.semgrep {
+        info!("Executing Review Pass 0 (Semgrep AST scan)...");
+        run_semgrep_pass0(diff, config, repo_path).await
+    } else {
+        Vec::new()
+    };
+    if !pass0_issues.is_empty() {
+        info!(
+            "Pass 0 detected {} deterministic AST finding(s)",
+            pass0_issues.len()
+        );
+    }
+
     if !config.review.two_pass {
         info!("Running single-pass review pipeline");
-        let prompt = generate_single_pass_prompt(diff, config);
+        let prompt = generate_single_pass_prompt(diff, config, &pass0_issues);
         let (resp, prov) = chain.complete_with_fallback(&prompt).await?;
-        let parsed = parse_review_response(&resp)?;
+        let mut parsed = parse_review_response(&resp)?;
+        merge_pass0_findings(&mut parsed, pass0_issues);
         return Ok((parsed, prov));
     }
 
     info!("Executing Review Pass 1 (Detective - broad anomaly discovery)...");
-    let pass1_prompt = generate_pass1_detective_prompt(diff, config);
+    let pass1_prompt = generate_pass1_detective_prompt(diff, config, &pass0_issues);
     let (pass1_candidates, provider_name) = chain.complete_with_fallback(&pass1_prompt).await?;
 
     info!("Executing Review Pass 2 (Judge - verification & confidence filtering)...");
-    let pass2_prompt = generate_pass2_judge_prompt(diff, config, &pass1_candidates, false_positives);
+    let pass2_prompt =
+        generate_pass2_judge_prompt(diff, config, &pass1_candidates, false_positives);
     let (pass2_response, _) = chain.complete_with_fallback(&pass2_prompt).await?;
 
-    let review = parse_review_response(&pass2_response)?;
+    let mut review = parse_review_response(&pass2_response)?;
+    merge_pass0_findings(&mut review, pass0_issues);
     Ok((review, provider_name))
 }
 
@@ -331,7 +651,7 @@ pub async fn review_diff_content(
     let config = RevueConfig::find_and_load(config_path)?;
     let parsed = crate::diff::ParsedDiff::parse(raw_diff)?;
     let chain = build_provider_chain(&config);
-    execute_review_pipeline(&parsed, &config, &chain, &[]).await
+    execute_review_pipeline(&parsed, &config, &chain, &[], None).await
 }
 
 pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>) -> Result<()> {
@@ -340,7 +660,10 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
 
     let raw_diff = fetch_local_diff(base)?;
     if raw_diff.trim().is_empty() {
-        println!("No changes detected between working copy and '{}' (checked git and jj).", base);
+        println!(
+            "No changes detected between working copy and '{}' (checked git and jj).",
+            base
+        );
         return Ok(());
     }
 
@@ -356,7 +679,14 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     parsed.enrich_with_disk_context(None);
 
     let chain = build_provider_chain(&config);
-    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain, &[]).await?;
+    let (review, provider_name) = execute_review_pipeline(
+        &parsed,
+        &config,
+        &chain,
+        &[],
+        Some(std::path::Path::new(".")),
+    )
+    .await?;
 
     if format == "json" {
         println!("{}", serde_json::to_string_pretty(&review)?);
@@ -385,6 +715,25 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     }
 
     Ok(())
+}
+
+fn is_local_checkout_matching_repo(repo: &str) -> bool {
+    if let Ok(output) = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+    {
+        if output.status.success() {
+            let url = String::from_utf8_lossy(&output.stdout);
+            let url = url.trim().trim_end_matches('/').trim_end_matches(".git");
+            let repo_path = repo.trim().trim_matches('/').trim_end_matches(".git");
+            let remote_path = match url.split_once("://") {
+                Some((_, rest)) => rest.split_once('/').map_or("", |(_, path)| path),
+                None => url.split_once(':').map_or("", |(_, path)| path),
+            };
+            return remote_path == repo_path;
+        }
+    }
+    false
 }
 
 pub async fn run_pr_review(
@@ -419,11 +768,24 @@ pub async fn run_pr_review(
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
     parsed.apply_filters(&config.review.ignore);
 
-    // Enrich with local filesystem context if working inside a checkout of the repo
-    parsed.enrich_with_disk_context(None);
+    // Enrich with local filesystem context only if working inside a checkout of the matching repo
+    let local_checkout = if is_local_checkout_matching_repo(repo) {
+        Some(std::path::Path::new("."))
+    } else {
+        tracing::debug!(
+            "Current directory does not match target PR repository '{}'; skipping local checkout scan",
+            repo
+        );
+        None
+    };
+
+    if let Some(path) = local_checkout {
+        parsed.enrich_with_disk_context(Some(path));
+    }
 
     let chain = build_provider_chain(&config);
-    let (review, provider_name) = execute_review_pipeline(&parsed, &config, &chain, &[]).await?;
+    let (review, provider_name) =
+        execute_review_pipeline(&parsed, &config, &chain, &[], local_checkout).await?;
 
     let mut inline_comments = Vec::new();
     for issue in &review.issues {
@@ -447,12 +809,19 @@ pub async fn run_pr_review(
         }
     }
 
+    let pipeline_desc = if config.review.semgrep {
+        "Pass 0 (Semgrep AST) → Pass 1 (Detective) → Pass 2 (Judge)"
+    } else {
+        "Pass 1 (Detective) → Pass 2 (Judge)"
+    };
+
     let summary = format!(
-        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}\n\n---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** Pass 1 (Detective) → Pass 2 (Judge)\n- **Engine:** Revue v0.1.0\n</details>",
+        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}\n\n---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
         provider_name,
         review.summary,
         parsed.files.len(),
-        inline_comments.len()
+        inline_comments.len(),
+        pipeline_desc
     );
 
     if dry_run {
@@ -506,5 +875,136 @@ mod tests {
         let output = parse_review_response(raw).expect("Should parse raw json");
         assert_eq!(output.summary, "No changes");
         assert!(output.issues.is_empty());
+    }
+
+    #[test]
+    fn test_parse_semgrep_json_results() {
+        let sample = r#"{
+            "errors": [],
+            "results": [
+                {
+                    "check_id": "rules.security.no-hardcoded-keys",
+                    "path": "./hosts/nixos-nvme/default.nix",
+                    "start": { "line": 42, "col": 5 },
+                    "extra": {
+                        "message": "Do not hardcode private keys in repository files",
+                        "severity": "ERROR",
+                        "lines": "key = \"xyz\";",
+                        "fix": "sops.secrets.key = { ... };"
+                    }
+                },
+                {
+                    "check_id": "rules.no-options-in-hosts",
+                    "path": "hosts/nixos-nvme/default.nix",
+                    "start": { "line": 15, "col": 1 },
+                    "extra": {
+                        "message": "Declare options in modules, not host definitions",
+                        "severity": "WARNING",
+                        "lines": "options = { ... };"
+                    }
+                }
+            ]
+        }"#;
+
+        let issues = parse_semgrep_results(sample);
+        assert_eq!(issues.len(), 2);
+
+        // First finding: security severity, stripped ./ prefix, suggestion preserved
+        assert_eq!(issues[0].file, "hosts/nixos-nvme/default.nix");
+        assert_eq!(issues[0].line, 42);
+        assert_eq!(issues[0].severity, "security");
+        assert_eq!(
+            issues[0].title,
+            "AST Rule: rules.security.no-hardcoded-keys"
+        );
+        assert_eq!(
+            issues[0].comment,
+            "Do not hardcode private keys in repository files"
+        );
+        assert_eq!(
+            issues[0].suggestion.as_deref(),
+            Some("sops.secrets.key = { ... };")
+        );
+
+        // Second finding: warning severity
+        assert_eq!(issues[1].file, "hosts/nixos-nvme/default.nix");
+        assert_eq!(issues[1].line, 15);
+        assert_eq!(issues[1].severity, "warning");
+        assert_eq!(issues[1].suggestion, None);
+    }
+
+    #[test]
+    fn test_pass1_detective_prompt_with_pass0_findings() {
+        let diff_str = r#"--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() {
++    let x = 1;
+ }
+"#;
+        let diff = ParsedDiff::parse(diff_str).unwrap();
+        let config = RevueConfig::default();
+        let pass0_findings = vec![ReviewIssue {
+            file: "src/main.rs".to_string(),
+            line: 2,
+            severity: "bug".to_string(),
+            title: "AST Rule: unused-var".to_string(),
+            comment: "Variable x is unused".to_string(),
+            suggestion: Some("let _x = 1;".to_string()),
+        }];
+
+        let prompt = generate_pass1_detective_prompt(&diff, &config, &pass0_findings);
+        assert!(prompt.contains("DETERMINISTIC AST RULES (PASS 0 FINDINGS):"));
+        assert!(prompt.contains("AST Rule: unused-var"));
+        assert!(prompt.contains("Variable x is unused"));
+        assert!(prompt.contains("Suggested Fix: let _x = 1;"));
+    }
+
+    #[test]
+    fn test_merge_pass0_findings() {
+        let mut review = ReviewOutput {
+            summary: "Initial".to_string(),
+            issues: vec![ReviewIssue {
+                file: "src/main.rs".to_string(),
+                line: 2,
+                severity: "bug".to_string(),
+                title: "Semgrep Bug".to_string(),
+                comment: "Exact duplicate finding".to_string(),
+                suggestion: None,
+            }],
+        };
+
+        let pass0_issues = vec![
+            ReviewIssue {
+                file: "src/main.rs".to_string(),
+                line: 2, // duplicate finding (same title) -> should not be added
+                severity: "bug".to_string(),
+                title: "Semgrep Bug".to_string(),
+                comment: "Exact duplicate finding".to_string(),
+                suggestion: None,
+            },
+            ReviewIssue {
+                file: "src/main.rs".to_string(),
+                line: 2, // distinct finding on same line -> SHOULD be added
+                severity: "security".to_string(),
+                title: "Distinct Sec Bug".to_string(),
+                comment: "Separate vulnerability on line 2".to_string(),
+                suggestion: None,
+            },
+            ReviewIssue {
+                file: "src/lib.rs".to_string(),
+                line: 10, // new file/line -> should be added
+                severity: "security".to_string(),
+                title: "Semgrep Sec".to_string(),
+                comment: "New issue".to_string(),
+                suggestion: None,
+            },
+        ];
+
+        merge_pass0_findings(&mut review, pass0_issues);
+        assert_eq!(review.issues.len(), 3);
+        assert_eq!(review.issues[0].title, "Semgrep Bug");
+        assert_eq!(review.issues[1].title, "Distinct Sec Bug");
+        assert_eq!(review.issues[2].title, "Semgrep Sec");
     }
 }
