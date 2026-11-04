@@ -14,7 +14,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: kleinbem/actions/.github/workflows/zizmor.yaml@c6ea0e5c23ac0e1b5e959c5a2ffd715ceb8b68a9 # v1.2.1
+    uses: kleinbem/actions/.github/workflows/zizmor.yaml@a1647881d0d61e4d5b299a054c3ec1e0ace1ebba # v1.2.2
 
   check:
     runs-on: ubuntu-latest
