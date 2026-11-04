@@ -128,6 +128,10 @@ pub struct ReviewSection {
     pub summary: bool,
     #[serde(default = "default_true")]
     pub two_pass: bool,
+    #[serde(default = "default_true")]
+    pub semgrep: bool,
+    #[serde(default)]
+    pub semgrep_config: Option<String>,
     #[serde(default)]
     pub ignore: Vec<String>,
     #[serde(default)]
@@ -166,6 +170,8 @@ impl Default for ReviewSection {
             min_severity: default_min_severity(),
             summary: true,
             two_pass: true,
+            semgrep: true,
+            semgrep_config: None,
             ignore: vec![
                 "**/flake.lock".to_string(),
                 "**/Cargo.lock".to_string(),
@@ -334,6 +340,11 @@ review:
   # Two-pass verification: Pass 1 discovers candidate bugs, Pass 2 judges & filters false positives
   two_pass: true
 
+  # Pass 0: Deterministic static AST analysis via Semgrep before LLM cascade
+  semgrep: true
+  # Optional explicit config path (defaults to .semgrep/ or .semgrep.yml in repo root)
+  # semgrep_config: ".semgrep"
+
   # Minimum severity level to post inline comments: info | warning | error | critical
   min_severity: warning
 
@@ -371,7 +382,6 @@ review:
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,12 +389,14 @@ mod tests {
     #[test]
     fn test_parse_native_revue_yaml() {
         let yaml = RevueConfig::default_yaml_template();
-        let config: RevueConfig = serde_yaml::from_str(yaml).expect("Template should be valid YAML");
+        let config: RevueConfig =
+            serde_yaml::from_str(yaml).expect("Template should be valid YAML");
         assert_eq!(config.version, 1);
         assert_eq!(config.forge.url, "https://git.kleinbem.dev");
         assert_eq!(config.providers.cascade.len(), 5);
         assert_eq!(config.providers.cascade[0], "antigravity");
         assert_eq!(config.providers.cascade[1], "mesh-llm");
+        assert!(config.review.semgrep);
         assert!(config.review.ignore.contains(&"**/flake.lock".to_string()));
     }
 
@@ -405,7 +417,8 @@ reviews:
         let tmp_path = std::env::temp_dir().join("test_coderabbit.yaml");
         std::fs::write(&tmp_path, legacy_yaml).unwrap();
 
-        let config = RevueConfig::load_legacy_coderabbit(&tmp_path).expect("Legacy conversion should succeed");
+        let config = RevueConfig::load_legacy_coderabbit(&tmp_path)
+            .expect("Legacy conversion should succeed");
         let _ = std::fs::remove_file(tmp_path);
         assert_eq!(config.review.language, "en-GB");
         assert_eq!(config.review.tone, "Direct and crisp");
