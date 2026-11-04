@@ -24,7 +24,9 @@
             pname = "revue-web";
             version = "0.1.0";
             src = ./web;
-            npmDepsHash = "sha256-+mXKx++AnWxSKZjboLheqO1qGq+TFFKVSy3hPuk6PHk=";
+            # Hashes come from package-lock.json, so Dependabot bumps need no hash update.
+            npmDeps = pkgs.importNpmLock { npmRoot = ./web; };
+            npmConfigHook = pkgs.importNpmLock.npmConfigHook;
             installPhase = ''
               mkdir -p $out
               cp -r build/* $out/
