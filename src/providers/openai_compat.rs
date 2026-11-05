@@ -48,7 +48,12 @@ struct OpenAiError {
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(display_name: String, endpoint: String, model: String, api_key: Option<String>) -> Self {
+    pub fn new(
+        display_name: String,
+        endpoint: String,
+        model: String,
+        api_key: Option<String>,
+    ) -> Self {
         Self {
             display_name,
             endpoint,

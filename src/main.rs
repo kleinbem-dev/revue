@@ -13,6 +13,7 @@ pub mod reviewer;
 pub mod scrubber;
 pub mod server;
 pub mod skills;
+pub mod synthesizer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,6 +85,33 @@ enum Commands {
 
     /// Run as an MCP (Model Context Protocol) stdio server for AI coding agents
     Mcp,
+
+    /// Synthesize a Semgrep rule from a code review finding (AI-Learns-Once)
+    LearnRule {
+        /// Target repository (e.g. kleinbem/nix-config)
+        #[arg(short, long)]
+        repo: String,
+
+        /// File path where the finding occurred
+        #[arg(short, long)]
+        file: String,
+
+        /// Finding title
+        #[arg(short, long)]
+        title: String,
+
+        /// Finding comment/explanation
+        #[arg(short, long)]
+        comment: String,
+
+        /// Relevant code snippet
+        #[arg(short, long)]
+        snippet: Option<String>,
+
+        /// Do not append to .semgrep/learned-rules.yaml; print to stdout only
+        #[arg(long)]
+        no_commit: bool,
+    },
 }
 
 #[tokio::main]
@@ -110,7 +138,11 @@ async fn main() -> Result<()> {
         Commands::Diff { base, format } => {
             reviewer::run_diff_review(&base, &format, cli.config.as_deref()).await?;
         }
-        Commands::Pr { index, repo, dry_run } => {
+        Commands::Pr {
+            index,
+            repo,
+            dry_run,
+        } => {
             reviewer::run_pr_review(index, repo.as_deref(), dry_run, cli.config.as_deref()).await?;
         }
         Commands::Daemon {
@@ -131,6 +163,41 @@ async fn main() -> Result<()> {
         }
         Commands::Mcp => {
             mcp::run_mcp_server(cli.config.as_deref()).await?;
+        }
+        Commands::LearnRule {
+            repo,
+            file,
+            title,
+            comment,
+            snippet,
+            no_commit,
+        } => {
+            let config = config::RevueConfig::find_and_load(cli.config.as_deref())?;
+            let chain = reviewer::build_provider_chain(&config);
+            let req = synthesizer::RuleSynthesizeRequest {
+                repo,
+                file,
+                line: None,
+                title,
+                comment,
+                snippet,
+                commit: !no_commit,
+            };
+            let resp = synthesizer::synthesize_rule(req, &chain).await;
+            if resp.success {
+                println!("=== Synthesized Semgrep Rule: {} ===", resp.rule_id);
+                println!("{}", resp.yaml);
+                if let Some(path) = resp.saved_path {
+                    println!("\nPersisted rule to {}", path);
+                }
+            } else {
+                eprintln!(
+                    "Failed to synthesize valid Semgrep rule: {}",
+                    resp.error
+                        .unwrap_or_else(|| "Unknown validation error".to_string())
+                );
+                std::process::exit(1);
+            }
         }
     }
 

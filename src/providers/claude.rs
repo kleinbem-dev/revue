@@ -33,7 +33,10 @@ impl Provider for ClaudeCliProvider {
 
         if !output.status.success() {
             let combined = format!("{}\n{}", stderr, stdout);
-            if combined.contains("usage limit") || combined.contains("rate limit") || combined.contains("overloaded") {
+            if combined.contains("usage limit")
+                || combined.contains("rate limit")
+                || combined.contains("overloaded")
+            {
                 return Err(anyhow!("Claude usage limit detected: {}", combined.trim()));
             }
             return Err(anyhow!(

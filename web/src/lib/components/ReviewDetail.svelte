@@ -13,6 +13,9 @@
 	let copiedFindingId = $state<string | null>(null);
 	let copiedPromptId = $state<string | null>(null);
 	let markingFalsePositive = $state<string | null>(null);
+	let synthesizingRule = $state<string | null>(null);
+	let synthesizedRules = $state<Record<string, { id: string; yaml: string; path?: string }>>({});
+	let synthesizeError = $state<Record<string, string>>({});
 
 	const findingsList = $derived(review?.findings ?? []);
 
@@ -90,6 +93,40 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 			console.error('Failed to submit feedback:', e);
 		} finally {
 			markingFalsePositive = null;
+		}
+	}
+
+	async function synthesizeAstRule(finding: Finding, id: string) {
+		synthesizingRule = id;
+		synthesizeError[id] = '';
+		try {
+			const res = await fetch('/api/rules/synthesize', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					repo: review.repo,
+					file: finding.file,
+					line: finding.line,
+					title: finding.title,
+					comment: finding.body,
+					snippet: finding.snippet,
+					commit: true
+				})
+			});
+			const data = await res.json();
+			if (res.ok && data.success) {
+				synthesizedRules[id] = {
+					id: data.rule_id,
+					yaml: data.yaml,
+					path: data.saved_path
+				};
+			} else {
+				synthesizeError[id] = data.error || 'Failed to synthesize valid Semgrep rule';
+			}
+		} catch (e: any) {
+			synthesizeError[id] = e?.message || 'Network error synthesizing rule';
+		} finally {
+			synthesizingRule = null;
 		}
 	}
 </script>
@@ -279,6 +316,21 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 										{/if}
 									</button>
 
+									<button
+										class="action-btn ast-btn"
+										disabled={synthesizingRule === findingKey}
+										onclick={() => synthesizeAstRule(finding, findingKey)}
+										title="Synthesize a deterministic Semgrep AST YAML rule so this anti-pattern is caught in 0 tokens locally"
+									>
+										{#if synthesizingRule === findingKey}
+											<span>⚡</span> Synthesizing...
+										{:else if synthesizedRules[findingKey]}
+											<span class="success-icon">✓</span> Rule Learned!
+										{:else}
+											<span>⚡</span> Synthesize AST Rule
+										{/if}
+									</button>
+
 									{#if finding.feedback === 'false_positive'}
 										<span class="feedback-badge dismissed" title="Revue learned this was a false alarm and will prune similar findings for {review.repo}">
 											<span>🚫</span> Dismissed as False Alarm (Learned)
@@ -298,6 +350,22 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 										</button>
 									{/if}
 								</div>
+
+								{#if synthesizedRules[findingKey]}
+									<div class="synthesized-rule-box">
+										<div class="synthesized-header">
+											<span class="rule-badge">🎯 Learned AST Rule: <code>{synthesizedRules[findingKey].id}</code></span>
+											{#if synthesizedRules[findingKey].path}
+												<span class="rule-path">Saved to <code>{synthesizedRules[findingKey].path}</code></span>
+											{/if}
+										</div>
+										<pre class="rule-yaml"><code>{synthesizedRules[findingKey].yaml}</code></pre>
+									</div>
+								{:else if synthesizeError[findingKey]}
+									<div class="synthesized-error-box">
+										<span>⚠️ {synthesizeError[findingKey]}</span>
+									</div>
+								{/if}
 							</div>
 						{/each}
 					{/if}
@@ -726,6 +794,82 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 		background: linear-gradient(135deg, rgba(249, 115, 22, 0.25) 0%, rgba(139, 92, 246, 0.25) 100%);
 		border-color: #f97316;
 		color: #ffedd5;
+	}
+
+	.ast-btn {
+		background: rgba(14, 165, 233, 0.12);
+		border-color: rgba(14, 165, 233, 0.3);
+		color: #38bdf8;
+	}
+
+	.ast-btn:hover:not(:disabled) {
+		background: rgba(14, 165, 233, 0.25);
+		border-color: #0ea5e9;
+		color: #e0f2fe;
+	}
+
+	.ast-btn:disabled {
+		opacity: 0.6;
+		cursor: wait;
+	}
+
+	.synthesized-rule-box {
+		margin-top: 1rem;
+		background: #090d16;
+		border: 1px solid rgba(14, 165, 233, 0.3);
+		border-radius: 0.5rem;
+		padding: 0.85rem;
+	}
+
+	.synthesized-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		margin-bottom: 0.6rem;
+		font-size: 0.8rem;
+	}
+
+	.rule-badge {
+		color: #38bdf8;
+		font-weight: 600;
+	}
+
+	.rule-badge code {
+		color: #7dd3fc;
+		background: rgba(14, 165, 233, 0.15);
+		padding: 0.15rem 0.4rem;
+		border-radius: 0.3rem;
+	}
+
+	.rule-path {
+		color: #94a3b8;
+		font-size: 0.75rem;
+	}
+
+	.rule-path code {
+		color: #cbd5e1;
+	}
+
+	.rule-yaml {
+		margin: 0;
+		padding: 0.75rem;
+		background: #020408;
+		border-radius: 0.4rem;
+		overflow-x: auto;
+		font-size: 0.78rem;
+		line-height: 1.4;
+		color: #e2e8f0;
+	}
+
+	.synthesized-error-box {
+		margin-top: 0.75rem;
+		padding: 0.5rem 0.8rem;
+		background: rgba(239, 68, 68, 0.1);
+		border: 1px solid rgba(239, 68, 68, 0.25);
+		border-radius: 0.4rem;
+		color: #fca5a5;
+		font-size: 0.8rem;
 	}
 
 	.dismiss-btn {

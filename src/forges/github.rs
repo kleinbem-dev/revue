@@ -26,10 +26,7 @@ struct GitHubReviewComment<'a> {
 impl GitHubClient {
     pub fn new(token: Option<String>) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static("revue/0.1.0"),
-        );
+        headers.insert(USER_AGENT, HeaderValue::from_static("revue/0.1.0"));
 
         let resolved_token = token.or_else(|| std::env::var("GITHUB_TOKEN").ok());
 
@@ -70,7 +67,9 @@ impl Forge for GitHubClient {
             ));
         }
 
-        res.text().await.map_err(|e| anyhow!("Failed to read diff: {}", e))
+        res.text()
+            .await
+            .map_err(|e| anyhow!("Failed to read diff: {}", e))
     }
 
     async fn post_review(
@@ -80,7 +79,10 @@ impl Forge for GitHubClient {
         summary: &str,
         comments: &[InlineReviewComment],
     ) -> Result<()> {
-        let url = format!("https://api.github.com/repos/{}/pulls/{}/reviews", repo, pr_index);
+        let url = format!(
+            "https://api.github.com/repos/{}/pulls/{}/reviews",
+            repo, pr_index
+        );
 
         let gh_comments: Vec<_> = comments
             .iter()
@@ -121,7 +123,8 @@ impl Forge for GitHubClient {
                 let mut fallback_body = summary.to_string();
                 fallback_body.push_str("\n\n### 📝 Inline Findings (Consolidated)\n\n");
                 for c in comments {
-                    fallback_body.push_str(&format!("- **`{}:{}`**\n{}\n\n", c.path, c.line, c.body));
+                    fallback_body
+                        .push_str(&format!("- **`{}:{}`**\n{}\n\n", c.path, c.line, c.body));
                 }
 
                 let fallback_req = CreateReviewRequest {
@@ -146,7 +149,10 @@ impl Forge for GitHubClient {
                     ));
                 }
 
-                info!("Successfully submitted fallback review to GitHub PR #{}", pr_index);
+                info!(
+                    "Successfully submitted fallback review to GitHub PR #{}",
+                    pr_index
+                );
                 return Ok(());
             }
 

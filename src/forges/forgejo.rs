@@ -27,10 +27,7 @@ struct ForgejoReviewComment<'a> {
 impl ForgejoClient {
     pub fn new(base_url: String, token: Option<String>) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static("revue/0.1.0"),
-        );
+        headers.insert(USER_AGENT, HeaderValue::from_static("revue/0.1.0"));
         if let Some(t) = token {
             headers.insert(
                 AUTHORIZATION,
@@ -54,7 +51,10 @@ impl ForgejoClient {
 #[async_trait]
 impl Forge for ForgejoClient {
     async fn fetch_pr_diff(&self, repo: &str, pr_index: u64) -> Result<String> {
-        let url = format!("{}/api/v1/repos/{}/pulls/{}.diff", self.base_url, repo, pr_index);
+        let url = format!(
+            "{}/api/v1/repos/{}/pulls/{}.diff",
+            self.base_url, repo, pr_index
+        );
         let res = self
             .client
             .get(&url)
@@ -82,7 +82,10 @@ impl Forge for ForgejoClient {
         summary: &str,
         comments: &[InlineReviewComment],
     ) -> Result<()> {
-        let url = format!("{}/api/v1/repos/{}/pulls/{}/reviews", self.base_url, repo, pr_index);
+        let url = format!(
+            "{}/api/v1/repos/{}/pulls/{}/reviews",
+            self.base_url, repo, pr_index
+        );
 
         let forgejo_comments: Vec<_> = comments
             .iter()
@@ -121,7 +124,8 @@ impl Forge for ForgejoClient {
                 let mut fallback_body = summary.to_string();
                 fallback_body.push_str("\n\n### 📝 Inline Findings (Consolidated)\n\n");
                 for c in comments {
-                    fallback_body.push_str(&format!("- **`{}:{}`**\n{}\n\n", c.path, c.line, c.body));
+                    fallback_body
+                        .push_str(&format!("- **`{}:{}`**\n{}\n\n", c.path, c.line, c.body));
                 }
 
                 let fallback_req = CreateReviewRequest {
@@ -146,7 +150,10 @@ impl Forge for ForgejoClient {
                     ));
                 }
 
-                info!("Successfully submitted fallback review to Forgejo PR #{}", pr_index);
+                info!(
+                    "Successfully submitted fallback review to Forgejo PR #{}",
+                    pr_index
+                );
                 return Ok(());
             }
 

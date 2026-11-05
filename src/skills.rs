@@ -74,11 +74,7 @@ pub fn load_skill_from_dir(dir: &Path) -> Option<LoadedSkill> {
     let triggers = default_triggers_for_skill(&name);
 
     // Limit body to top 150 lines so context window remains fast and crisp
-    let trimmed_body: String = body
-        .lines()
-        .take(150)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let trimmed_body: String = body.lines().take(150).collect::<Vec<_>>().join("\n");
 
     Some(LoadedSkill {
         name,
@@ -92,7 +88,11 @@ pub fn load_skill_from_dir(dir: &Path) -> Option<LoadedSkill> {
 fn parse_frontmatter(content: &str, fallback_name: &str) -> (String, String, String) {
     let mut lines = content.lines();
     if lines.next() != Some("---") {
-        return (fallback_name.to_string(), String::new(), content.to_string());
+        return (
+            fallback_name.to_string(),
+            String::new(),
+            content.to_string(),
+        );
     }
 
     let mut name = fallback_name.to_string();
@@ -140,24 +140,16 @@ fn default_triggers_for_skill(skill_name: &str) -> Vec<String> {
             "automations.yaml".to_string(),
             "scripts.yaml".to_string(),
         ],
-        "jj-workflow" => vec![
-            ".jj".to_string(),
-            "workspaces".to_string(),
-        ],
-        "agent-ops" => vec![
-            "justfile".to_string(),
-            ".github/workflows/".to_string(),
-        ],
+        "jj-workflow" => vec![".jj".to_string(), "workspaces".to_string()],
+        "agent-ops" => vec!["justfile".to_string(), ".github/workflows/".to_string()],
         "nixpkgs-packaging" | "nixos-org" | "nixpkgs-contributing" => vec![
             "pkgs/".to_string(),
             "package.nix".to_string(),
             "default.nix".to_string(),
         ],
-        "mesh-llm-contributing" => vec![
-            "mesh".to_string(),
-            "cuda".to_string(),
-            "llama".to_string(),
-        ],
+        "mesh-llm-contributing" => {
+            vec!["mesh".to_string(), "cuda".to_string(), "llama".to_string()]
+        }
         _ => vec![skill_name.to_string()],
     }
 }
@@ -181,7 +173,10 @@ pub fn is_skill_triggered(skill: &LoadedSkill, changed_files: &[String]) -> bool
 }
 
 /// Find all matching skills for a review's changed files
-pub fn find_matching_skills(skills_dir: Option<&Path>, changed_files: &[String]) -> Vec<LoadedSkill> {
+pub fn find_matching_skills(
+    skills_dir: Option<&Path>,
+    changed_files: &[String],
+) -> Vec<LoadedSkill> {
     let dir = match skills_dir {
         Some(d) => d,
         None => return Vec::new(),
@@ -248,7 +243,9 @@ pub fn format_skills_for_prompt(skills: &[LoadedSkill]) -> String {
 
     let mut out = String::new();
     out.push_str("\nFLEET DOMAIN SKILLS & INVARIANTS (Enforce strictly):\n");
-    out.push_str("The following official team guidelines apply to the files modified in this review:\n\n");
+    out.push_str(
+        "The following official team guidelines apply to the files modified in this review:\n\n",
+    );
 
     for s in skills {
         out.push_str(&format!("--- BEGIN SKILL: {} ---\n", s.name));
