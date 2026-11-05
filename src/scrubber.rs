@@ -123,11 +123,14 @@ mod tests {
 
     #[test]
     fn test_scrub_api_keys() {
-        let diff = r#"
-+const GITHUB_TOKEN = "ghp_1234567890abcdefghijklmnopqrstuvwxyz1234";
-+const GOOGLE_KEY = "AIzaSyD-1234567890abcdefghijklmnopqrstu";
-+const AWS_KEY = "AKIA1234567890ABCDEF";
-"#;
+        // Made-up keys in the shapes the scrubber matches; concat! leaves room
+        // for the gitleaks:allow markers without changing the diff.
+        let diff = concat!(
+            "\n",
+            "+const GITHUB_TOKEN = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz1234\";\n",
+            "+const GOOGLE_KEY = \"AIzaSyD-1234567890abcdefghijklmnopqrstu\";\n", // gitleaks:allow
+            "+const AWS_KEY = \"AKIA1234567890ABCDEF\";\n",                       // gitleaks:allow
+        );
         let (scrubbed, count) = scrub_diff(diff);
         assert_eq!(count, 3);
         assert!(scrubbed.contains("[REDACTED_SECRET:GITHUB_TOKEN]"));

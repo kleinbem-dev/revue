@@ -9,7 +9,7 @@ You can also use `bind:property={get, set}`, where `get` and `set` are functions
 />
 ```
 
-In the case of readonly bindings like [dimension bindings](#Dimensions), the `get` value should be `null`:
+In the case of readonly bindings like [dimension bindings](https://svelte.dev/docs/svelte/bind#Dimensions), the `get` value should be `null`:
 
 ```svelte
 <div
