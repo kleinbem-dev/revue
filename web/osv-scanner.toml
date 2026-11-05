@@ -1,0 +1,7 @@
+# deepmerge has no fixed release yet (TehShrike/deepmerge#285); it comes in
+# only through @sveltejs/vite-plugin-svelte (dev, latest 7.3.1 still needs it)
+# and merges the local Vite config at build time, never request data.
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2027-02-03
+reason = "No fixed deepmerge release (TehShrike/deepmerge#285); dev-only via @sveltejs/vite-plugin-svelte, merges trusted build config"

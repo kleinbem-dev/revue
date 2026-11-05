@@ -1,0 +1,4 @@
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0449"
+ignoreUntil = 2027-02-03
+reason = "unsafe-libyaml is unmaintained, no fixed release; comes in via serde_yaml, replacement tracked in kleinbem-dev/revue#16"

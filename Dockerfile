@@ -8,9 +8,13 @@ RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
 
+# Alpine's /bin/sh is busybox ash, which supports pipefail.
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+
 # Build static binary
-RUN cargo build --release --target $(rustc -vV | sed -n 's|host: ||p')
-RUN cp target/$(rustc -vV | sed -n 's|host: ||p')/release/revue /usr/local/bin/revue
+RUN target="$(rustc -vV | sed -n 's|host: ||p')" \
+    && cargo build --release --target "$target" \
+    && cp "target/$target/release/revue" /usr/local/bin/revue
 
 # Runtime container
 FROM alpine:3.21
