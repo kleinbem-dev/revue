@@ -49,3 +49,15 @@ updates:
       actions:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+
+  # Base images (FROM lines). Majors such as node 22 -> 24 come alone.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      docker:
+        patterns: ["*"]
+        update-types: [minor, patch]
