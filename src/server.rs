@@ -299,48 +299,82 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
         uptime: uptime_str,
     };
 
-    let providers = vec![
-        ProviderStatus {
-            name: "Gemini (Subscription)".to_string(),
-            r#type: "subscription".to_string(),
-            model: "gemini-2.5-pro / flash".to_string(),
-            status: "active".to_string(),
-            cost_per_token: "$0 (Flat)".to_string(),
-            latency_avg: "2.1s".to_string(),
-        },
-        ProviderStatus {
-            name: "Mesh-LLM (Fleet P2P)".to_string(),
-            r#type: "mesh-gpu".to_string(),
-            model: "Qwen3-4B-Q4_K_M (CUDA)".to_string(),
-            status: "ready".to_string(),
-            cost_per_token: "$0 (P2P GPU)".to_string(),
-            latency_avg: "1.8s".to_string(),
-        },
-        ProviderStatus {
-            name: "Gemini API".to_string(),
-            r#type: "api".to_string(),
-            model: "gemini-2.5-flash".to_string(),
-            status: "ready".to_string(),
-            cost_per_token: "Pay-as-you-go".to_string(),
-            latency_avg: "1.4s".to_string(),
-        },
-        ProviderStatus {
-            name: "Local Ollama".to_string(),
-            r#type: "local".to_string(),
-            model: "qwen2.5-coder:14b".to_string(),
-            status: "ready".to_string(),
-            cost_per_token: "$0 (Air-gapped)".to_string(),
-            latency_avg: "4.8s".to_string(),
-        },
-        ProviderStatus {
-            name: "Claude Code".to_string(),
-            r#type: "quota-shield".to_string(),
-            model: "claude-3-7-sonnet".to_string(),
-            status: "quota-shield".to_string(),
-            cost_per_token: "Shielded".to_string(),
-            latency_avg: "N/A".to_string(),
-        },
-    ];
+    let cfg = crate::config::RevueConfig::find_and_load(state.config_path.as_deref())
+        .unwrap_or_else(|e| {
+            warn!("Failed to load config for provider status: {}", e);
+            Default::default()
+        });
+    let mut providers = Vec::new();
+    for name in &cfg.providers.cascade {
+        match name.as_str() {
+            "antigravity" | "gemini-cli" | "antigravity-cli" => {
+                providers.push(ProviderStatus {
+                    name: "Antigravity CLI".to_string(),
+                    r#type: "cli".to_string(),
+                    model: "gemini-2.5-pro / flash".to_string(),
+                    status: "configured".to_string(),
+                    cost_per_token: "$0 (Subscription)".to_string(),
+                    latency_avg: "—".to_string(),
+                });
+            }
+            "mesh-llm" | "mesh" => {
+                providers.push(ProviderStatus {
+                    name: "Mesh-LLM (Fleet P2P)".to_string(),
+                    r#type: "mesh-gpu".to_string(),
+                    model: cfg.providers.mesh_llm_model.clone(),
+                    status: "configured".to_string(),
+                    cost_per_token: "$0 (P2P GPU)".to_string(),
+                    latency_avg: "—".to_string(),
+                });
+            }
+            "gemini" | "gemini-api" => {
+                let has_key = std::env::var("GEMINI_API_KEY").is_ok()
+                    || std::env::var("GOOGLE_API_KEY").is_ok();
+                providers.push(ProviderStatus {
+                    name: "Gemini API".to_string(),
+                    r#type: "api".to_string(),
+                    model: cfg.providers.gemini_model.clone(),
+                    status: if has_key {
+                        "configured".to_string()
+                    } else {
+                        "unconfigured".to_string()
+                    },
+                    cost_per_token: "Pay-as-you-go".to_string(),
+                    latency_avg: "—".to_string(),
+                });
+            }
+            "ollama" => {
+                providers.push(ProviderStatus {
+                    name: "Local Ollama".to_string(),
+                    r#type: "local".to_string(),
+                    model: cfg.providers.ollama_model.clone(),
+                    status: "configured".to_string(),
+                    cost_per_token: "$0 (Air-gapped)".to_string(),
+                    latency_avg: "—".to_string(),
+                });
+            }
+            "claude" | "claude-cli" => {
+                providers.push(ProviderStatus {
+                    name: "Claude CLI".to_string(),
+                    r#type: "cli".to_string(),
+                    model: "claude-3-7-sonnet".to_string(),
+                    status: "configured".to_string(),
+                    cost_per_token: "Shielded".to_string(),
+                    latency_avg: "—".to_string(),
+                });
+            }
+            other => {
+                providers.push(ProviderStatus {
+                    name: other.to_string(),
+                    r#type: "custom".to_string(),
+                    model: "custom".to_string(),
+                    status: "configured".to_string(),
+                    cost_per_token: "—".to_string(),
+                    latency_avg: "—".to_string(),
+                });
+            }
+        }
+    }
 
     Json(DaemonStatusResponse {
         status: "healthy".to_string(),

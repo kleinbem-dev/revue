@@ -24,7 +24,7 @@ jobs:
           persist-credentials: false
       - name: Lint workflows
         uses: kleinbem/actions/actionlint@9c2dd4246a1f91d324895247e1a390171288ffe0 # v1.1.0
-      - uses: kleinbem/actions/nix-setup@7ec628296d5194e6e10031706387b992a10a1638 # v1.0.1
+      - uses: kleinbem/actions/nix-setup@f716d62182471a9e862ae0bd61d34201e6cea971 # v1.3.1
       - name: Flake check
         run: nix flake check
       # flake check doesn't build packages; this is what catches a bad npm bump.
