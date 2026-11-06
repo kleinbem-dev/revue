@@ -55,6 +55,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Odd Node majors never become LTS. Node 24 matches the Nix build's
+      # nixpkgs nodejs.
+      - dependency-name: node
+        versions: [">= 25, < 26", ">= 27, < 28", ">= 29, < 30"]
     cooldown:
       default-days: 7
     groups:
