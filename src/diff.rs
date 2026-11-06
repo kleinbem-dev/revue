@@ -201,6 +201,281 @@ impl ParsedDiff {
             .find(|f| f.new_path == file_path)
             .and_then(|f| (start..=end).find(|line| f.added_lines.contains(line)))
     }
+
+    /// Formats diff and surrounding file context under an estimated token budget.
+    /// Files are prioritized by semantic importance (source > tests/configs > docs).
+    /// Generated lockfiles and bundles are omitted with clear summaries.
+    pub fn format_with_budget(&self, max_tokens: usize) -> (String, DiffBudgetStats) {
+        let mut stats = DiffBudgetStats {
+            total_files: self.files.len(),
+            ..Default::default()
+        };
+
+        // Standard token heuristic: ~4 characters per token; reject zero budget
+        assert!(max_tokens > 0, "max_tokens must be strictly greater than zero");
+        let max_chars = max_tokens.saturating_mul(4);
+        let mut total_chars = 0;
+        let mut out = String::new();
+
+        let mut reviewable_files: Vec<&FilePatch> = Vec::new();
+        let mut generated_files: Vec<&FilePatch> = Vec::new();
+
+        for f in &self.files {
+            if is_likely_generated_or_lockfile(effective_path(f)) {
+                generated_files.push(f);
+            } else {
+                reviewable_files.push(f);
+            }
+        }
+
+        // Emit concise summary for omitted generated lockfiles
+        for gen in generated_files {
+            stats.omitted_generated_files += 1;
+            let note = format!("=== FILE OMITTED (LOCKFILE / GENERATED): {} ===\n\n", effective_path(gen));
+            total_chars += note.len();
+            out.push_str(&note);
+        }
+
+        // Sort reviewable files by priority (1 = Core source, 2 = Tests/config, 3 = Docs)
+        reviewable_files.sort_by_key(|f| {
+            let p = effective_path(f);
+            (classify_file_priority(p), p.to_string())
+        });
+
+        for f in reviewable_files {
+            let path_display = effective_path(f);
+            if total_chars >= max_chars {
+                stats.omitted_budget_files += 1;
+                let (additions, deletions) = count_patch_lines(f);
+                out.push_str(&format!(
+                    "=== FILE OMITTED (EXCEEDS TOKEN BUDGET): {} (+{}, -{}) ===\n\n",
+                    path_display, additions, deletions
+                ));
+                continue;
+            }
+
+            let remaining_chars = max_chars.saturating_sub(total_chars);
+            let new_header = if f.new_path == "/dev/null" {
+                "/dev/null".to_string()
+            } else {
+                format!("b/{}", f.new_path)
+            };
+            let file_header = format!(
+                "=== MODIFIED FILE: {} ===\n--- a/{}\n+++ {}\n",
+                path_display,
+                f.old_path.as_deref().unwrap_or(path_display),
+                new_header
+            );
+
+            // If we cannot even fit the file header, omit the file
+            if file_header.len() > remaining_chars {
+                stats.omitted_budget_files += 1;
+                let (additions, deletions) = count_patch_lines(f);
+                out.push_str(&format!(
+                    "=== FILE OMITTED (EXCEEDS TOKEN BUDGET): {} (+{}, -{}) ===\n\n",
+                    path_display, additions, deletions
+                ));
+                continue;
+            }
+
+            let mut file_buf = String::new();
+            file_buf.push_str(&file_header);
+
+            let mut truncated_hunks = false;
+            let mut skipped_hunk_lines = 0;
+            let mut done = false;
+
+            // Reserve space for truncation marker and final newline if we need to truncate
+            const TRUNC_MARKER_EST: usize = 30;
+            const FINAL_NEWLINE: usize = 1;
+
+            for (hi, h) in f.hunks.iter().enumerate() {
+                let hunk_header = format!(
+                    "@@ -{},{} +{},{} @@\n",
+                    h.old_start, h.old_lines, h.new_start, h.new_lines
+                );
+
+                if file_buf.len() + hunk_header.len() + TRUNC_MARKER_EST + FINAL_NEWLINE > remaining_chars {
+                    truncated_hunks = true;
+                    skipped_hunk_lines += f.hunks[hi..].iter().map(|x| x.lines.len()).sum::<usize>();
+                    break;
+                }
+                file_buf.push_str(&hunk_header);
+
+                for (li, l) in h.lines.iter().enumerate() {
+                    if file_buf.len() + l.len() + 1 + TRUNC_MARKER_EST + FINAL_NEWLINE > remaining_chars {
+                        truncated_hunks = true;
+                        skipped_hunk_lines += h.lines.len() - li;
+                        skipped_hunk_lines += f.hunks[hi + 1..].iter().map(|x| x.lines.len()).sum::<usize>();
+                        done = true;
+                        break;
+                    }
+                    file_buf.push_str(l);
+                    file_buf.push('\n');
+                }
+
+                if done {
+                    break;
+                }
+            }
+
+            if truncated_hunks {
+                let marker = format!(
+                    "[... {} lines truncated to stay within review token budget ...]\n",
+                    skipped_hunk_lines
+                );
+                if file_buf.len() + marker.len() + FINAL_NEWLINE <= remaining_chars {
+                    file_buf.push_str(&marker);
+                } else {
+                    let short_marker = "[... truncated ...]\n";
+                    if file_buf.len() + short_marker.len() + FINAL_NEWLINE <= remaining_chars {
+                        file_buf.push_str(short_marker);
+                    }
+                }
+            } else if let Some(ctx) = &f.file_context {
+                let ctx_header = format!(
+                    "\n[SURROUNDING FILE CONTEXT FOR {} (numbered lines)]:\n",
+                    path_display
+                );
+                if file_buf.len() + ctx_header.len() + ctx.len() + FINAL_NEWLINE <= remaining_chars {
+                    file_buf.push_str(&ctx_header);
+                    file_buf.push_str(ctx);
+                    file_buf.push('\n');
+                }
+            }
+
+            if file_buf.len() < remaining_chars {
+                file_buf.push('\n');
+            }
+            total_chars += file_buf.len();
+            out.push_str(&file_buf);
+            stats.included_files += 1;
+        }
+
+        stats.estimated_tokens = total_chars / 4;
+        (out, stats)
+    }
+}
+
+/// Statistics summarizing token budgeting and file compression for review payloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffBudgetStats {
+    pub total_files: usize,
+    pub included_files: usize,
+    pub omitted_generated_files: usize,
+    pub omitted_budget_files: usize,
+    pub estimated_tokens: usize,
+}
+
+/// Heuristic check for auto-generated lockfiles, build artifacts, or minified assets.
+pub fn is_likely_generated_or_lockfile(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+
+    // Common package/dependency lockfiles
+    if matches!(
+        basename,
+        "cargo.lock"
+            | "flake.lock"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lockb"
+            | "composer.lock"
+            | "poetry.lock"
+            | "pipfile.lock"
+            | "go.sum"
+            | "gemfile.lock"
+    ) {
+        return true;
+    }
+
+    // Minified files, sourcemaps, generated bundles
+    if basename.ends_with(".min.js")
+        || basename.ends_with(".min.css")
+        || basename.ends_with(".map")
+        || basename.ends_with(".bundle.js")
+    {
+        return true;
+    }
+
+    // Common vendor directories
+    if path.starts_with("vendor/")
+        || path.contains("/vendor/")
+        || path.starts_with("node_modules/")
+        || path.contains("/node_modules/")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Semantic review priority: 1 = core logic/source, 2 = tests & configuration, 3 = documentation & text.
+pub fn classify_file_priority(path: &str) -> u8 {
+    let lower = path.to_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+
+    // Test files and test directories (by path segment and prefix/suffix to avoid matching words like inspector or specification)
+    let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+    let in_test_dir = lower
+        .split('/')
+        .any(|seg| matches!(seg, "test" | "tests" | "spec" | "specs" | "__tests__"));
+    if in_test_dir
+        || file_name.starts_with("test_")
+        || file_name.contains(".test.")
+        || file_name.contains(".spec.")
+        || file_name.contains("_test.")
+        || file_name.contains("_spec.")
+    {
+        return 2;
+    }
+
+    // Config files
+    if matches!(ext, "toml" | "yaml" | "yml" | "json" | "env" | "ini" | "cfg") {
+        return 2;
+    }
+
+    // Documentation, markdown, plain text, assets
+    if matches!(ext, "md" | "txt" | "rst" | "html" | "svg" | "png" | "jpg" | "jpeg" | "ico") {
+        return 3;
+    }
+
+    // Core executable source code
+    if matches!(
+        ext,
+        "rs" | "go" | "py" | "ts" | "js" | "svelte" | "c" | "cpp" | "h" | "hpp" | "zig" | "nix"
+            | "sh" | "bash" | "sql" | "java" | "kt" | "swift" | "rb" | "php" | "cs"
+    ) {
+        return 1;
+    }
+
+    2
+}
+
+    /// Counts added and removed lines across all hunks in a patch.
+    fn count_patch_lines(f: &FilePatch) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for h in &f.hunks {
+        for l in &h.lines {
+            if l.starts_with('+') {
+                added += 1;
+            } else if l.starts_with('-') {
+                removed += 1;
+            }
+        }
+    }
+    (added, removed)
+}
+
+/// Returns the review path, resolving `/dev/null` deleted files to their original `old_path`.
+fn effective_path(f: &FilePatch) -> &str {
+    if f.new_path == "/dev/null" {
+        f.old_path.as_deref().unwrap_or(&f.new_path)
+    } else {
+        &f.new_path
+    }
 }
 
 fn clean_diff_path(path: &str) -> String {
@@ -280,5 +555,135 @@ mod tests {
             diff.find_first_added_line_in_range("src/main.rs", 1, 1),
             None
         );
+    }
+
+    /// Verifies that lockfiles are automatically suppressed from prompt diffs.
+    #[test]
+    fn test_format_with_budget_omits_generated_lockfiles() {
+        let diff = ParsedDiff::parse(SAMPLE_DIFF).expect("Diff parsing should succeed");
+        let (formatted, stats) = diff.format_with_budget(24_000);
+
+        assert_eq!(stats.total_files, 2);
+        assert_eq!(stats.included_files, 1);
+        assert_eq!(stats.omitted_generated_files, 1);
+        assert!(formatted.contains("=== FILE OMITTED (LOCKFILE / GENERATED): flake.lock ==="));
+        assert!(formatted.contains("=== MODIFIED FILE: src/main.rs ==="));
+    }
+
+    /// Verifies priority-based inclusion when token budget is limited.
+    #[test]
+    fn test_format_with_budget_prioritization_and_truncation() {
+        const MULTI_DIFF: &str = r#"--- a/docs/guide.md
++++ b/docs/guide.md
+@@ -1,2 +1,3 @@
+ # Documentation
++New documentation section.
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,3 @@
+ pub fn hello() {
++    println!("core logic");
+ }
+"#;
+        let diff = ParsedDiff::parse(MULTI_DIFF).expect("Diff parsing should succeed");
+        // Limit budget strictly to ~25 tokens (~100 chars) so second file is omitted
+        let (formatted, stats) = diff.format_with_budget(25);
+
+        assert_eq!(stats.total_files, 2);
+        assert_eq!(stats.included_files, 1);
+        assert_eq!(stats.omitted_budget_files, 1);
+        // Core source code included first, documentation omitted due to budget
+        assert!(formatted.contains("=== MODIFIED FILE: src/lib.rs ==="));
+        assert!(formatted.contains("=== FILE OMITTED (EXCEEDS TOKEN BUDGET): docs/guide.md"));
+    }
+
+    /// Verifies that a truncated file stays strictly within its character budget.
+    #[test]
+    fn test_format_with_budget_truncation_strictly_within_character_limit() {
+        const SINGLE_DIFF: &str = r#"--- a/src/long.rs
++++ b/src/long.rs
+@@ -1,5 +1,10 @@
+ line 1
++line 2
++line 3
++line 4
++line 5
+"#;
+        let diff = ParsedDiff::parse(SINGLE_DIFF).expect("Diff parsing should succeed");
+        // 25 tokens = 100 character budget limit
+        let (formatted, stats) = diff.format_with_budget(25);
+        assert_eq!(stats.included_files, 1);
+        assert!(
+            formatted.len() <= 25 * 4,
+            "formatted length {} exceeded 100",
+            formatted.len()
+        );
+    }
+
+    /// Verifies that a deleted non-lockfile emits direct +++ /dev/null header without 'b/' prefix.
+    #[test]
+    fn test_format_with_budget_deleted_file_unified_header() {
+        const DELETED_SOURCE: &str = r#"--- a/src/old.rs
++++ /dev/null
+@@ -1,2 +0,0 @@
+-fn deprecated() {}
+"#;
+        let diff = ParsedDiff::parse(DELETED_SOURCE).expect("Diff parsing should succeed");
+        let (formatted, stats) = diff.format_with_budget(24_000);
+        assert_eq!(stats.included_files, 1);
+        assert!(
+            formatted.contains("+++ /dev/null\n"),
+            "must contain direct +++ /dev/null without b/ prefix"
+        );
+        assert!(!formatted.contains("+++ b//dev/null"));
+    }
+
+    /// Verifies that words containing substrings like 'test' or 'spec' do not falsely demote core source files.
+    #[test]
+    fn test_classify_file_priority_precision() {
+        // Core source files containing 'test' or 'spec' substrings must remain priority 1
+        assert_eq!(classify_file_priority("src/inspector.rs"), 1);
+        assert_eq!(classify_file_priority("src/latest.rs"), 1);
+        assert_eq!(classify_file_priority("src/specification.rs"), 1);
+
+        // Actual test files and directories must receive priority 2
+        assert_eq!(classify_file_priority("tests/eval_benchmark.rs"), 2);
+        assert_eq!(classify_file_priority("src/worker_test.rs"), 2);
+        assert_eq!(classify_file_priority("src/auth.spec.ts"), 2);
+    }
+
+    /// Verifies that deleted lockfiles (where new_path is /dev/null) are properly identified and suppressed via old_path.
+    #[test]
+    fn test_format_with_budget_deleted_file_classification() {
+        const DELETED_DIFF: &str = r#"--- a/Cargo.lock
++++ /dev/null
+@@ -1,3 +0,0 @@
+-version = 3
+-[[package]]
+-name = "old_pkg"
+"#;
+        let diff = ParsedDiff::parse(DELETED_DIFF).expect("Diff parsing should succeed");
+        let (formatted, stats) = diff.format_with_budget(24_000);
+
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.omitted_generated_files, 1);
+        assert!(formatted.contains("=== FILE OMITTED (LOCKFILE / GENERATED): Cargo.lock ==="));
+    }
+
+    /// Verifies that node_modules is only matched as a whole path segment.
+    #[test]
+    fn test_is_likely_generated_node_modules_segment() {
+        assert!(is_likely_generated_or_lockfile("node_modules/pkg/index.js"));
+        assert!(is_likely_generated_or_lockfile("packages/web/node_modules/pkg/index.js"));
+        assert!(!is_likely_generated_or_lockfile("my_node_modules/file.rs"));
+        assert!(!is_likely_generated_or_lockfile("src/node_modules_helper.rs"));
+    }
+
+    /// Verifies that passing zero max_tokens immediately triggers an assertion failure.
+    #[test]
+    #[should_panic(expected = "max_tokens must be strictly greater than zero")]
+    fn test_format_with_budget_zero_tokens_panics() {
+        let diff = ParsedDiff::parse("--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n").unwrap();
+        let _ = diff.format_with_budget(0);
     }
 }
