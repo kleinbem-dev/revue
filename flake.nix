@@ -51,7 +51,7 @@
             meta = with lib; {
               description = "Self-hosted, forge-agnostic AI code review engine";
               homepage = "https://github.com/kleinbem-dev/revue";
-              license = with licenses; [ mit asl20 ];
+              license = licenses.mit;
               mainProgram = "revue";
             };
           };
@@ -71,9 +71,9 @@
         };
       });
 
-      overlays.default = final: prev: {
-        revue = self.packages.${prev.system}.default;
-        nix-revue = self.packages.${prev.system}.default;
+      overlays.default = final: _prev: {
+        revue = self.packages.${final.stdenv.hostPlatform.system}.default;
+        nix-revue = self.packages.${final.stdenv.hostPlatform.system}.default;
       };
 
       nixosModules.default =
