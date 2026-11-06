@@ -3,8 +3,8 @@ use crate::reviewer::run_pr_review;
 use anyhow::Result;
 use axum::{
     body::Bytes,
-    extract::{Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    extract::{ConnectInfo, Request, State},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
@@ -13,11 +13,14 @@ use axum::{
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn};
 
@@ -110,12 +113,70 @@ pub struct DeleteFeedbackRequest {
 }
 
 #[derive(Clone)]
-struct ServerState {
-    config_path: Option<String>,
-    webhook_secret: Option<String>,
-    start_time: Instant,
-    db: Option<crate::db::DbPool>,
-    reviews: Arc<RwLock<Vec<ReviewRecord>>>,
+pub struct ServerState {
+    pub config_path: Option<String>,
+    pub webhook_secret: Option<String>,
+    pub api_key: Option<String>,
+    pub insecure_webhooks: bool,
+    pub start_time: Instant,
+    pub db: Option<crate::db::DbPool>,
+    pub reviews: Arc<RwLock<Vec<ReviewRecord>>>,
+    pub manual_review_seq: Arc<AtomicU64>,
+}
+
+/// Enforce API key authentication on mutating endpoints.
+/// If `api_key` is set in state, require `Authorization: Bearer <key>` or `X-Revue-Key: <key>`.
+/// If `api_key` is not configured, permit loopback requests only (127.0.0.1, ::1); reject remote callers.
+pub fn check_api_auth(
+    headers: &HeaderMap,
+    state: &ServerState,
+    client_ip: Option<std::net::IpAddr>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if let Some(configured_key) = &state.api_key {
+        let auth_header = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| {
+                s.strip_prefix("Bearer ")
+                    .or_else(|| s.strip_prefix("bearer "))
+            })
+            .map(|s| s.trim());
+
+        let custom_header = headers
+            .get("x-revue-key")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.trim());
+
+        let provided = auth_header.or(custom_header);
+        match provided {
+            Some(token)
+                if token.len() == configured_key.len()
+                    && bool::from(token.as_bytes().ct_eq(configured_key.as_bytes())) =>
+            {
+                Ok(())
+            }
+            _ => Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "Unauthorized: valid API key required in Authorization: Bearer <key> or X-Revue-Key header"
+                })),
+            )),
+        }
+    } else {
+        // No explicit API key: allow loopback clients (localhost / 127.0.0.1 / ::1).
+        // A missing client IP fails closed to prevent unintended exposure behind misconfigured proxies.
+        let is_loopback = client_ip.map(|ip| ip.is_loopback()).unwrap_or(false);
+        if is_loopback {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "Forbidden: REVUE_API_KEY must be configured for non-loopback access"
+                })),
+            ))
+        }
+    }
 }
 
 /// Verify HMAC-SHA256 signature from GitHub (`X-Hub-Signature-256`) or Forgejo/Gitea (`X-Gitea-Signature` / `X-Forgejo-Signature`)
@@ -362,8 +423,15 @@ async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse
 
 async fn record_finding_feedback(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<FeedbackRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let client_ip = Some(addr.ip());
+    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
+        return (status, msg).into_response();
+    }
+
     info!(
         "Received feedback '{}' for {} [{}: {}]",
         req.feedback_type, req.repo, req.file_path, req.issue_title
@@ -382,6 +450,14 @@ async fn record_finding_feedback(
             .await
         {
             error!("Failed to record feedback to db: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": format!("Database error: {}", e)
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -404,6 +480,7 @@ async fn record_finding_feedback(
             "message": format!("Feedback '{}' recorded for {}", req.feedback_type, req.issue_title)
         })),
     )
+        .into_response()
 }
 
 async fn get_all_feedback(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
@@ -431,24 +508,34 @@ async fn get_all_feedback(State(state): State<Arc<ServerState>>) -> impl IntoRes
 
 async fn delete_feedback_entry(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<DeleteFeedbackRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let client_ip = Some(addr.ip());
+    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
+        return (status, msg).into_response();
+    }
+
     if let Some(db) = &state.db {
         match db.delete_feedback(req.id).await {
             Ok(true) => (
                 StatusCode::OK,
                 Json(serde_json::json!({ "status": "success", "message": "Feedback deleted" })),
-            ),
+            )
+                .into_response(),
             Ok(false) => (
                 StatusCode::NOT_FOUND,
                 Json(
                     serde_json::json!({ "status": "not_found", "message": "Feedback ID not found" }),
                 ),
-            ),
+            )
+                .into_response(),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "status": "error", "message": e.to_string() })),
-            ),
+            )
+                .into_response(),
         }
     } else {
         (
@@ -457,6 +544,7 @@ async fn delete_feedback_entry(
                 serde_json::json!({ "status": "success", "message": "No persistent db configured" }),
             ),
         )
+            .into_response()
     }
 }
 
@@ -471,8 +559,15 @@ async fn get_available_skills() -> impl IntoResponse {
 
 async fn handle_synthesize_rule(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<crate::synthesizer::RuleSynthesizeRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let client_ip = Some(addr.ip());
+    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
+        return (status, msg).into_response();
+    }
+
     let repo_clean = req.repo.trim();
     if repo_clean.is_empty()
         || repo_clean.contains("..")
@@ -493,7 +588,8 @@ async fn handle_synthesize_rule(
                     req.repo
                 )),
             }),
-        );
+        )
+            .into_response();
     }
 
     if req.commit && crate::synthesizer::resolve_repo_root(&req.repo).is_none() {
@@ -510,7 +606,8 @@ async fn handle_synthesize_rule(
                     req.repo
                 )),
             }),
-        );
+        )
+            .into_response();
     }
 
     let config =
@@ -518,17 +615,24 @@ async fn handle_synthesize_rule(
     let chain = crate::reviewer::build_provider_chain(&config);
     let resp = crate::synthesizer::synthesize_rule(req, &chain).await;
     if resp.success {
-        (StatusCode::OK, Json(resp))
+        (StatusCode::OK, Json(resp)).into_response()
     } else {
-        (StatusCode::UNPROCESSABLE_ENTITY, Json(resp))
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(resp)).into_response()
     }
 }
 
 /// Triggers an asynchronous code review for the specified pull request.
 async fn trigger_review(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<TriggerRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let client_ip = Some(addr.ip());
+    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
+        return (status, msg).into_response();
+    }
+
     let repo = req.repo.clone();
     let pr = req.pr;
 
@@ -538,7 +642,9 @@ async fn trigger_review(
         repo, pr, publish
     );
 
-    let review_id = format!("rev-manual-{}", pr);
+    let seq = state.manual_review_seq.fetch_add(1, Ordering::Relaxed);
+    let clean_repo = repo.replace('/', "-");
+    let review_id = format!("rev-manual-{}-{}-{}", clean_repo, pr, seq);
     let pending_review = ReviewRecord {
         id: review_id.clone(),
         repo: repo.clone(),
@@ -565,7 +671,7 @@ async fn trigger_review(
 
     {
         let mut reviews = state.reviews.write().await;
-        reviews.retain(|r| r.pr_number != pr || r.repo != repo);
+        reviews.retain(|r| !(r.pr_number == pr && r.repo == repo && r.id == review_id));
         reviews.insert(0, pending_review);
     }
 
@@ -661,6 +767,7 @@ async fn trigger_review(
             "message": format!("Review pipeline started for {} #{}", repo, pr)
         })),
     )
+        .into_response()
 }
 
 /// Handles incoming forge webhook events (push, pull_request, comments).
@@ -669,13 +776,21 @@ async fn handle_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // 1. Verify HMAC signature if webhook_secret is configured
-    if let Some(secret) = &state.webhook_secret {
-        if !secret.is_empty() {
+    // 1. Verify HMAC signature if webhook_secret is configured; fail closed otherwise
+    match &state.webhook_secret {
+        Some(secret) if !secret.is_empty() => {
             if !verify_signature(secret, &headers, &body) {
                 return (
                     StatusCode::UNAUTHORIZED,
                     "Webhook HMAC signature verification failed\n".to_string(),
+                );
+            }
+        }
+        _ => {
+            if !state.insecure_webhooks {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "Webhook secret is not configured; refusing unauthenticated webhook. Set REVUE_WEBHOOK_SECRET or pass --insecure-webhooks to allow.\n".to_string(),
                 );
             }
         }
@@ -865,20 +980,54 @@ pub async fn run_daemon(
     webhook_secret: Option<&str>,
     static_dir: Option<&str>,
     database_url: Option<&str>,
+    api_key: Option<&str>,
+    insecure_webhooks: bool,
 ) -> Result<()> {
-    // Determine webhook secret priority: CLI flag / env arg > config file > REVUE_WEBHOOK_SECRET env
-    let resolved_secret = if let Some(s) = webhook_secret {
-        Some(s.to_string())
-    } else if let Ok(cfg) = RevueConfig::find_and_load(config_path) {
-        cfg.forge.webhook_secret
-    } else {
-        std::env::var("REVUE_WEBHOOK_SECRET").ok()
-    };
+    let loaded_cfg = RevueConfig::find_and_load(config_path).ok();
+    let non_blank = |s: &str| !s.trim().is_empty();
+
+    // Determine webhook secret priority with non-blank filtering per source
+    let resolved_secret = webhook_secret
+        .filter(|s| non_blank(s))
+        .map(str::to_string)
+        .or_else(|| {
+            loaded_cfg
+                .as_ref()
+                .and_then(|c| c.forge.webhook_secret.clone())
+                .filter(|s| non_blank(s))
+        })
+        .or_else(|| std::env::var("REVUE_WEBHOOK_SECRET").ok().filter(|s| non_blank(s)));
+
+    let resolved_insecure = insecure_webhooks
+        || loaded_cfg
+            .as_ref()
+            .map(|c| c.server.insecure_webhooks)
+            .unwrap_or(false);
 
     if resolved_secret.is_some() {
         info!("Webhook HMAC-SHA256 signature verification is ENABLED");
+    } else if resolved_insecure {
+        warn!("Webhook signature verification is DISABLED (--insecure-webhooks enabled). Insecure mode!");
     } else {
-        warn!("Webhook signature verification is DISABLED (no secret configured). Set REVUE_WEBHOOK_SECRET to enable.");
+        info!("Webhook secret is not configured; incoming webhooks will fail closed (401 Unauthorized). Set REVUE_WEBHOOK_SECRET or pass --insecure-webhooks to allow.");
+    }
+
+    // Determine API key priority with non-blank filtering per source
+    let resolved_api_key = api_key
+        .filter(|k| non_blank(k))
+        .map(str::to_string)
+        .or_else(|| {
+            loaded_cfg
+                .as_ref()
+                .and_then(|c| c.server.api_key.clone())
+                .filter(|k| non_blank(k))
+        })
+        .or_else(|| std::env::var("REVUE_API_KEY").ok().filter(|k| non_blank(k)));
+
+    if resolved_api_key.is_some() {
+        info!("API authentication is ENABLED (valid API key required for /api mutating operations)");
+    } else {
+        info!("API key is not configured; /api mutating operations restricted to loopback (127.0.0.1 / ::1) clients only.");
     }
 
     let db_url = database_url
@@ -899,15 +1048,50 @@ pub async fn run_daemon(
     let state = Arc::new(ServerState {
         config_path: config_path.map(|s| s.to_string()),
         webhook_secret: resolved_secret,
+        api_key: resolved_api_key,
+        insecure_webhooks: resolved_insecure,
         start_time: Instant::now(),
         db,
         reviews: Arc::new(RwLock::new(Vec::new())),
+        manual_review_seq: Arc::new(AtomicU64::new(1)),
     });
 
+    let mut allowed_origins: Vec<HeaderValue> = Vec::new();
+    if let Some(cfg) = &loaded_cfg {
+        for origin in &cfg.server.cors_origins {
+            if let Ok(val) = origin.parse::<HeaderValue>() {
+                allowed_origins.push(val);
+            }
+        }
+    }
+    // Always permit local development / loopback origins for web UI
+    for origin in &[
+        "http://localhost:8383",
+        "http://127.0.0.1:8383",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ] {
+        if let Ok(val) = origin.parse::<HeaderValue>() {
+            if !allowed_origins.contains(&val) {
+                allowed_origins.push(val);
+            }
+        }
+    }
+
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(allowed_origins)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static("x-revue-key"),
+            HeaderName::from_static("x-forgejo-event"),
+            HeaderName::from_static("x-gitea-event"),
+            HeaderName::from_static("x-github-event"),
+            HeaderName::from_static("x-hub-signature-256"),
+            HeaderName::from_static("x-forgejo-signature"),
+            HeaderName::from_static("x-gitea-signature"),
+        ]);
 
     let api_router = Router::new()
         .route("/health", get(health_check))
@@ -988,7 +1172,11 @@ pub async fn run_daemon(
 
     info!("revue daemon listening on http://{}", listen);
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -1105,5 +1293,80 @@ mod tests {
             findings[0].snippet.as_deref(),
             Some("std::fs::write(path, data)?;")
         );
+    }
+
+    #[test]
+    fn test_api_auth_with_configured_key() {
+        let state = ServerState {
+            config_path: None,
+            webhook_secret: None,
+            api_key: Some("secret-token-xyz".to_string()),
+            insecure_webhooks: false,
+            start_time: Instant::now(),
+            db: None,
+            reviews: Arc::new(RwLock::new(Vec::new())),
+            manual_review_seq: Arc::new(AtomicU64::new(0)),
+        };
+
+        // Missing header -> 401
+        let empty_headers = HeaderMap::new();
+        assert!(check_api_auth(&empty_headers, &state, None).is_err());
+
+        // Bearer token -> 200
+        let mut bearer_headers = HeaderMap::new();
+        bearer_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret-token-xyz"),
+        );
+        assert!(check_api_auth(&bearer_headers, &state, None).is_ok());
+
+        // X-Revue-Key header -> 200
+        let mut custom_headers = HeaderMap::new();
+        custom_headers.insert("x-revue-key", HeaderValue::from_static("secret-token-xyz"));
+        assert!(check_api_auth(&custom_headers, &state, None).is_ok());
+
+        // Invalid key -> 401
+        let mut wrong_headers = HeaderMap::new();
+        wrong_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer bad-token"),
+        );
+        assert!(check_api_auth(&wrong_headers, &state, None).is_err());
+    }
+
+    #[test]
+    fn test_api_auth_loopback_restriction() {
+        let state = ServerState {
+            config_path: None,
+            webhook_secret: None,
+            api_key: None,
+            insecure_webhooks: false,
+            start_time: Instant::now(),
+            db: None,
+            reviews: Arc::new(RwLock::new(Vec::new())),
+            manual_review_seq: Arc::new(AtomicU64::new(0)),
+        };
+
+        let headers = HeaderMap::new();
+
+        // Loopback IPv4 -> Ok
+        let loopback_v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(check_api_auth(&headers, &state, Some(loopback_v4)).is_ok());
+
+        // Loopback IPv6 -> Ok
+        let loopback_v6: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(check_api_auth(&headers, &state, Some(loopback_v6)).is_ok());
+
+        // Missing client IP without API key configured -> 403 Forbidden (fail closed)
+        assert_eq!(
+            check_api_auth(&headers, &state, None).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+
+        // Remote IP without API key configured -> 403 Forbidden
+        let remote_ip: std::net::IpAddr = "192.168.1.100".parse().unwrap();
+        let res = check_api_auth(&headers, &state, Some(remote_ip));
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
     }
 }

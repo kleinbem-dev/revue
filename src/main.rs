@@ -68,12 +68,20 @@ enum Commands {
     /// Run the webhook daemon for Forgejo and GitHub
     Daemon {
         /// Address to bind the HTTP webhook listener
-        #[arg(short, long, default_value = "0.0.0.0:8383")]
+        #[arg(short, long, default_value = "127.0.0.1:8383")]
         listen: String,
 
         /// Webhook HMAC secret for signature verification (or set REVUE_WEBHOOK_SECRET)
         #[arg(long, env = "REVUE_WEBHOOK_SECRET")]
         webhook_secret: Option<String>,
+
+        /// API key for authenticating /api routes (or set REVUE_API_KEY)
+        #[arg(long, env = "REVUE_API_KEY")]
+        api_key: Option<String>,
+
+        /// Allow unauthenticated webhooks (insecure testing mode only)
+        #[arg(long, default_value_t = false)]
+        insecure_webhooks: bool,
 
         /// Directory containing static web dashboard assets (defaults to ./web/build)
         #[arg(long, env = "REVUE_STATIC_DIR")]
@@ -160,6 +168,8 @@ async fn main() -> Result<()> {
         Commands::Daemon {
             listen,
             webhook_secret,
+            api_key,
+            insecure_webhooks,
             static_dir,
             database_url,
         } => {
@@ -170,6 +180,8 @@ async fn main() -> Result<()> {
                 webhook_secret.as_deref(),
                 static_dir.as_deref(),
                 database_url.as_deref(),
+                api_key.as_deref(),
+                insecure_webhooks,
             )
             .await?;
         }

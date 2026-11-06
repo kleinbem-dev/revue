@@ -38,4 +38,5 @@ sha2 = "0.11.1"
 hex = "0.4.3"
 regex = "1.13.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+subtle = "2.6"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "macros", "migrate"] }
