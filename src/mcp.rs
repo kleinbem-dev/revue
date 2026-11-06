@@ -136,7 +136,7 @@ pub async fn run_mcp_server(config_path: Option<&str>) -> Result<()> {
                                         "text": format!("Review failed: {}", e)
                                     }],
                                     "isError": true
-                                }))
+                                })),
                             }
                         }
                     }
@@ -165,7 +165,7 @@ pub async fn run_mcp_server(config_path: Option<&str>) -> Result<()> {
                             "text": format!("Unknown tool: {}", tool_name)
                         }],
                         "isError": true
-                    }))
+                    })),
                 }
             }
 
@@ -189,7 +189,9 @@ pub async fn run_mcp_server(config_path: Option<&str>) -> Result<()> {
                 result: Some(result),
                 error: None,
             };
-            stdout.write_all(serde_json::to_string(&response)?.as_bytes()).await?;
+            stdout
+                .write_all(serde_json::to_string(&response)?.as_bytes())
+                .await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
         }

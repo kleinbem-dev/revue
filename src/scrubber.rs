@@ -98,7 +98,10 @@ pub fn scrub_diff(diff: &str) -> (String, usize) {
     }
 
     if total_redacted > 0 {
-        info!("DLP Guard: Redacted {} sensitive secret(s) from diff prior to LLM analysis", total_redacted);
+        info!(
+            "DLP Guard: Redacted {} sensitive secret(s) from diff prior to LLM analysis",
+            total_redacted
+        );
     }
 
     (sanitized, total_redacted)
@@ -143,7 +146,8 @@ mod tests {
         let diff = r#"+DATABASE_URL="postgres://admin:super_secret_password_123@db.example.com:5432/revue""#;
         let (scrubbed, count) = scrub_diff(diff);
         assert_eq!(count, 1);
-        assert!(scrubbed.contains("postgres://admin:[REDACTED_SECRET:URI_PASSWORD]@db.example.com:5432/revue"));
+        assert!(scrubbed
+            .contains("postgres://admin:[REDACTED_SECRET:URI_PASSWORD]@db.example.com:5432/revue"));
         assert!(!scrubbed.contains("super_secret_password_123"));
     }
 }

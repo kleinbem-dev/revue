@@ -230,8 +230,16 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
         pass1_candidates: pass1.max(6),
         pass2_filtered: filtered.max(4),
         verified_findings: pass2.max(2),
-        avg_cost_saved: if cost_saved_str == "$0.00" { "$142.50".to_string() } else { cost_saved_str },
-        uptime: if uptime_str == "0m" { "99.98%".to_string() } else { uptime_str },
+        avg_cost_saved: if cost_saved_str == "$0.00" {
+            "$142.50".to_string()
+        } else {
+            cost_saved_str
+        },
+        uptime: if uptime_str == "0m" {
+            "99.98%".to_string()
+        } else {
+            uptime_str
+        },
     };
 
     let providers = vec![
@@ -398,7 +406,9 @@ async fn delete_feedback_entry(
             ),
             Ok(false) => (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "status": "not_found", "message": "Feedback ID not found" })),
+                Json(
+                    serde_json::json!({ "status": "not_found", "message": "Feedback ID not found" }),
+                ),
             ),
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -408,7 +418,9 @@ async fn delete_feedback_entry(
     } else {
         (
             StatusCode::OK,
-            Json(serde_json::json!({ "status": "success", "message": "No persistent db configured" })),
+            Json(
+                serde_json::json!({ "status": "success", "message": "No persistent db configured" }),
+            ),
         )
     }
 }
@@ -422,6 +434,61 @@ async fn get_available_skills() -> impl IntoResponse {
     }))
 }
 
+async fn handle_synthesize_rule(
+    State(state): State<Arc<ServerState>>,
+    Json(req): Json<crate::synthesizer::RuleSynthesizeRequest>,
+) -> impl IntoResponse {
+    let repo_clean = req.repo.trim();
+    if repo_clean.is_empty()
+        || repo_clean.contains("..")
+        || repo_clean.starts_with('/')
+        || repo_clean.starts_with('\\')
+        || repo_clean.split('/').count() > 2
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::synthesizer::RuleSynthesizeResponse {
+                success: false,
+                rule_id: String::new(),
+                yaml: String::new(),
+                validated: false,
+                saved_path: None,
+                error: Some(format!(
+                    "Invalid or untrusted repository name: '{}'",
+                    req.repo
+                )),
+            }),
+        );
+    }
+
+    if req.commit && crate::synthesizer::resolve_repo_root(&req.repo).is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(crate::synthesizer::RuleSynthesizeResponse {
+                success: false,
+                rule_id: String::new(),
+                yaml: String::new(),
+                validated: false,
+                saved_path: None,
+                error: Some(format!(
+                    "Repository '{}' is not recognized or permitted for local rule persistence",
+                    req.repo
+                )),
+            }),
+        );
+    }
+
+    let config =
+        crate::config::RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
+    let chain = crate::reviewer::build_provider_chain(&config);
+    let resp = crate::synthesizer::synthesize_rule(req, &chain).await;
+    if resp.success {
+        (StatusCode::OK, Json(resp))
+    } else {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(resp))
+    }
+}
+
 async fn trigger_review(
     State(state): State<Arc<ServerState>>,
     Json(req): Json<TriggerRequest>,
@@ -430,7 +497,10 @@ async fn trigger_review(
     let pr = req.pr;
 
     let publish = req.publish.unwrap_or(false);
-    info!("Received manual review trigger for {} #{} (publish: {})", repo, pr, publish);
+    info!(
+        "Received manual review trigger for {} #{} (publish: {})",
+        repo, pr, publish
+    );
 
     let review_id = format!("rev-manual-{}", pr);
     let pending_review = ReviewRecord {
@@ -449,7 +519,11 @@ async fn trigger_review(
         } else {
             "Autonomous two-pass review executing: Pass 1 Detective broad anomaly discovery, Pass 2 Judge verification with episodic brain constraints.".to_string()
         },
-        forge: if repo.contains("git.") { "forgejo".to_string() } else { "github".to_string() },
+        forge: if repo.contains("git.") {
+            "forgejo".to_string()
+        } else {
+            "github".to_string()
+        },
         findings: Vec::new(),
     };
 
@@ -483,7 +557,10 @@ async fn trigger_review(
                     } else {
                         "Two-pass review completed. Pass 1 detected 5 potential points of interest; Pass 2 Judge applied fleet negative constraints and confirmed 0 actionable defects. PR approved clean.".to_string()
                     };
-                    info!("Manual review completed for {} #{} (published: {})", repo_clone, pr, publish);
+                    info!(
+                        "Manual review completed for {} #{} (published: {})",
+                        repo_clone, pr, publish
+                    );
                 }
                 Err(e) => {
                     r.status = "completed".to_string();
@@ -492,7 +569,10 @@ async fn trigger_review(
                     r.pass2_verified = 0;
                     r.title = Some(format!("PR #{}: Review analysis completed", pr));
                     r.summary = format!("Analyzed PR changes for {} #{}. Pass 1 & Pass 2 verified no security boundary violations or syntax errors. Clean.", repo_clone, pr);
-                    info!("Manual review completed with notice for {} #{}: {:?}", repo_clone, pr, e);
+                    info!(
+                        "Manual review completed with notice for {} #{}: {:?}",
+                        repo_clone, pr, e
+                    );
                 }
             }
         }
@@ -552,10 +632,17 @@ async fn handle_webhook(
         .and_then(|r| r.full_name.clone());
 
     let pr_index = if event == "pull_request" {
-        if action != "opened" && action != "synchronized" && action != "synchronize" && action != "reopened" {
+        if action != "opened"
+            && action != "synchronized"
+            && action != "synchronize"
+            && action != "reopened"
+        {
             return (
                 StatusCode::OK,
-                format!("Ignored PR action '{}' (only opened/synchronize/reopen)", action),
+                format!(
+                    "Ignored PR action '{}' (only opened/synchronize/reopen)",
+                    action
+                ),
             );
         }
         payload
@@ -571,7 +658,11 @@ async fn handle_webhook(
 
         // Only handle comments on pull requests
         if event == "issue_comment" {
-            let is_pr = payload.issue.as_ref().and_then(|i| i.pull_request.as_ref()).is_some();
+            let is_pr = payload
+                .issue
+                .as_ref()
+                .and_then(|i| i.pull_request.as_ref())
+                .is_some();
             if !is_pr {
                 return (
                     StatusCode::OK,
@@ -580,7 +671,11 @@ async fn handle_webhook(
             }
         }
 
-        let body = payload.comment.as_ref().and_then(|c| c.body.as_deref()).unwrap_or("");
+        let body = payload
+            .comment
+            .as_ref()
+            .and_then(|c| c.body.as_deref())
+            .unwrap_or("");
         if !body.contains("@revue") && !body.contains("@nix-revue") {
             return (
                 StatusCode::OK,
@@ -606,23 +701,42 @@ async fn handle_webhook(
         (Some(num), Some(r)) => (num, r),
         _ => {
             warn!("Webhook missing PR number or repository name");
-            return (StatusCode::BAD_REQUEST, "Missing PR number or repo name".to_string());
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing PR number or repo name".to_string(),
+            );
         }
     };
 
-    info!("Received {} webhook for {} #{} (action: {})", event, repo, pr_num, action);
+    info!(
+        "Received {} webhook for {} #{} (action: {})",
+        event, repo, pr_num, action
+    );
 
     let config_path = state.config_path.clone();
     let repo_for_review = repo.clone();
 
     // Spawn review asynchronously in background so webhook returns 200 immediately
     tokio::spawn(async move {
-        if let Err(e) = run_pr_review(pr_num, Some(&repo_for_review), false, config_path.as_deref()).await {
-            error!("Failed to execute review for {} #{}: {:?}", repo_for_review, pr_num, e);
+        if let Err(e) = run_pr_review(
+            pr_num,
+            Some(&repo_for_review),
+            false,
+            config_path.as_deref(),
+        )
+        .await
+        {
+            error!(
+                "Failed to execute review for {} #{}: {:?}",
+                repo_for_review, pr_num, e
+            );
         }
     });
 
-    (StatusCode::ACCEPTED, format!("Review queued for {} #{}", repo, pr_num))
+    (
+        StatusCode::ACCEPTED,
+        format!("Review queued for {} #{}", repo, pr_num),
+    )
 }
 
 fn seed_initial_reviews() -> Vec<ReviewRecord> {
@@ -756,7 +870,10 @@ pub async fn run_daemon(
     let db = match crate::db::DbPool::connect(&db_url).await {
         Ok(pool) => Some(pool),
         Err(e) => {
-            warn!("Running without persistent database (error: {}). Falling back to in-memory store.", e);
+            warn!(
+                "Running without persistent database (error: {}). Falling back to in-memory store.",
+                e
+            );
             None
         }
     };
@@ -780,9 +897,13 @@ pub async fn run_daemon(
         .route("/api/status", get(get_status))
         .route("/api/reviews", get(get_reviews))
         .route("/api/trigger", post(trigger_review))
-        .route("/api/feedback", get(get_all_feedback).post(record_finding_feedback))
+        .route(
+            "/api/feedback",
+            get(get_all_feedback).post(record_finding_feedback),
+        )
         .route("/api/feedback/delete", post(delete_feedback_entry))
         .route("/api/skills", get(get_available_skills))
+        .route("/api/rules/synthesize", post(handle_synthesize_rule))
         .layer(cors)
         .with_state(state.clone());
 
@@ -793,7 +914,11 @@ pub async fn run_daemon(
     // 4. /var/lib/revue/web (system directory)
     let resolved_static_dir = if let Some(dir) = static_dir {
         let p = PathBuf::from(dir);
-        if p.exists() { Some(p) } else { None }
+        if p.exists() {
+            Some(p)
+        } else {
+            None
+        }
     } else {
         let candidate_rel = PathBuf::from("./web/build");
         let candidate_share = std::env::current_exe()
@@ -822,8 +947,7 @@ pub async fn run_daemon(
             fallback_index
         };
 
-        let serve_service = ServeDir::new(&static_path)
-            .fallback(ServeFile::new(fallback_file));
+        let serve_service = ServeDir::new(&static_path).fallback(ServeFile::new(fallback_file));
 
         Router::new()
             .merge(api_router)
@@ -884,10 +1008,7 @@ mod tests {
         let sig = compute_hmac(secret, body);
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-gitea-signature",
-            HeaderValue::from_str(&sig).unwrap(),
-        );
+        headers.insert("x-gitea-signature", HeaderValue::from_str(&sig).unwrap());
 
         assert!(verify_signature(secret, &headers, body));
     }

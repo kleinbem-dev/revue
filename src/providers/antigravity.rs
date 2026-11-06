@@ -33,7 +33,13 @@ impl Provider for AntigravityCliProvider {
             .arg(prompt)
             .output()
             .await
-            .map_err(|e| anyhow!("Failed to spawn antigravity CLI at '{}': {}", self.bin_path, e))?;
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to spawn antigravity CLI at '{}': {}",
+                    self.bin_path,
+                    e
+                )
+            })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

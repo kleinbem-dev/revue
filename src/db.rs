@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool, PgPool};
+use sqlx::{PgPool, Row, SqlitePool};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -95,8 +95,12 @@ impl DbPool {
     }
 
     async fn init_sqlite(pool: &SqlitePool) -> Result<()> {
-        sqlx::query("PRAGMA journal_mode = WAL;").execute(pool).await?;
-        sqlx::query("PRAGMA foreign_keys = ON;").execute(pool).await?;
+        sqlx::query("PRAGMA journal_mode = WAL;")
+            .execute(pool)
+            .await?;
+        sqlx::query("PRAGMA foreign_keys = ON;")
+            .execute(pool)
+            .await?;
 
         sqlx::query(
             r#"
@@ -128,7 +132,7 @@ impl DbPool {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_feedback_repo ON findings_feedback(repo, feedback_type);
-            "#
+            "#,
         )
         .execute(pool)
         .await
@@ -168,7 +172,7 @@ impl DbPool {
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_feedback_repo ON findings_feedback(repo, feedback_type);
-            "#
+            "#,
         )
         .execute(pool)
         .await
@@ -201,7 +205,7 @@ impl DbPool {
                                          pass1_candidates, pass2_filtered, verified_findings,
                                          cost_saved_usd, duration_ms, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    "#
+                    "#,
                 )
                 .bind(repo)
                 .bind(pr_number)
@@ -228,7 +232,7 @@ impl DbPool {
                                          cost_saved_usd, duration_ms, created_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     RETURNING id
-                    "#
+                    "#,
                 )
                 .bind(repo)
                 .bind(pr_number)
@@ -262,7 +266,7 @@ impl DbPool {
                         COALESCE(SUM(verified_findings), 0) as verified_findings,
                         COALESCE(SUM(cost_saved_usd), 0.0) as total_cost_saved
                     FROM reviews
-                    "#
+                    "#,
                 )
                 .fetch_one(pool)
                 .await?;
@@ -285,7 +289,7 @@ impl DbPool {
                         COALESCE(SUM(verified_findings), 0) as verified_findings,
                         COALESCE(SUM(cost_saved_usd), 0.0) as total_cost_saved
                     FROM reviews
-                    "#
+                    "#,
                 )
                 .fetch_one(pool)
                 .await?;
@@ -314,7 +318,7 @@ impl DbPool {
                     FROM reviews
                     ORDER BY id DESC
                     LIMIT ?
-                    "#
+                    "#,
                 )
                 .bind(limit)
                 .fetch_all(pool)
@@ -347,7 +351,7 @@ impl DbPool {
                     FROM reviews
                     ORDER BY id DESC
                     LIMIT $1
-                    "#
+                    "#,
                 )
                 .bind(limit)
                 .fetch_all(pool)
@@ -427,7 +431,11 @@ impl DbPool {
         }
     }
 
-    pub async fn get_false_positives(&self, repo: &str, limit: i64) -> Result<Vec<FindingFeedback>> {
+    pub async fn get_false_positives(
+        &self,
+        repo: &str,
+        limit: i64,
+    ) -> Result<Vec<FindingFeedback>> {
         match self {
             DbPool::Sqlite(pool) => {
                 let rows = sqlx::query(
@@ -437,7 +445,7 @@ impl DbPool {
                     WHERE repo = ? AND feedback_type = 'false_positive'
                     ORDER BY id DESC
                     LIMIT ?
-                    "#
+                    "#,
                 )
                 .bind(repo)
                 .bind(limit)
@@ -467,7 +475,7 @@ impl DbPool {
                     WHERE repo = $1 AND feedback_type = 'false_positive'
                     ORDER BY id DESC
                     LIMIT $2
-                    "#
+                    "#,
                 )
                 .bind(repo)
                 .bind(limit)
@@ -501,7 +509,7 @@ impl DbPool {
                     FROM findings_feedback
                     ORDER BY id DESC
                     LIMIT ?
-                    "#
+                    "#,
                 )
                 .bind(limit)
                 .fetch_all(pool)
@@ -529,7 +537,7 @@ impl DbPool {
                     FROM findings_feedback
                     ORDER BY id DESC
                     LIMIT $1
-                    "#
+                    "#,
                 )
                 .bind(limit)
                 .fetch_all(pool)
@@ -609,7 +617,10 @@ mod tests {
         assert_eq!(metrics.verified_findings, 4);
         assert!((metrics.total_cost_saved - 75.50).abs() < f64::EPSILON);
 
-        let recent = db.list_recent_reviews(10).await.expect("Should list reviews");
+        let recent = db
+            .list_recent_reviews(10)
+            .await
+            .expect("Should list reviews");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].repo, "kleinbem/nix-config");
     }
@@ -641,6 +652,9 @@ mod tests {
         assert_eq!(fps.len(), 1);
         assert_eq!(fps[0].issue_title, "ProtectHome read-only warning");
         assert_eq!(fps[0].feedback_type, "false_positive");
-        assert_eq!(fps[0].reason.as_deref(), Some("Intentionally read-only in nspawn containers"));
+        assert_eq!(
+            fps[0].reason.as_deref(),
+            Some("Intentionally read-only in nspawn containers")
+        );
     }
 }
