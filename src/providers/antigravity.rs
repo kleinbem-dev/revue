@@ -3,11 +3,13 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
 
+/// Provider that executes completions using local Google Antigravity CLI in a sandbox.
 pub struct AntigravityCliProvider {
     bin_path: String,
 }
 
 impl AntigravityCliProvider {
+    /// Constructs a new Antigravity CLI provider resolving binary from environment.
     pub fn new() -> Self {
         let bin_path = std::env::var("ANTIGRAVITY_BIN")
             .or_else(|_| std::env::var("ANTIGRAVITY_AGENTAPI_EXE"))
@@ -25,7 +27,7 @@ impl Provider for AntigravityCliProvider {
     async fn complete(&self, prompt: &str) -> Result<String> {
         let effort = std::env::var("REVUE_GEMINI_EFFORT").unwrap_or_else(|_| "low".to_string());
         let output = Command::new(&self.bin_path)
-            .arg("--dangerously-skip-permissions")
+            .arg("--sandbox")
             .arg("--disable-slash-commands")
             .arg("--effort")
             .arg(&effort)

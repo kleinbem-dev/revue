@@ -14,6 +14,7 @@ pub mod scrubber;
 pub mod server;
 pub mod skills;
 pub mod synthesizer;
+pub mod tree;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -114,6 +115,7 @@ enum Commands {
     },
 }
 
+/// Entry point for the revue CLI and daemon.
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -143,7 +145,17 @@ async fn main() -> Result<()> {
             repo,
             dry_run,
         } => {
-            reviewer::run_pr_review(index, repo.as_deref(), dry_run, cli.config.as_deref()).await?;
+            let db = crate::db::DbPool::connect(&crate::db::default_database_url())
+                .await
+                .ok();
+            reviewer::run_pr_review(
+                index,
+                repo.as_deref(),
+                dry_run,
+                cli.config.as_deref(),
+                db.as_ref(),
+            )
+            .await?;
         }
         Commands::Daemon {
             listen,

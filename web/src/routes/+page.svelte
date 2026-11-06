@@ -61,121 +61,15 @@
 	]);
 
 	let metrics = $state<DaemonMetrics>({
-		total_reviews: 24,
-		pass1_candidates: 184,
-		pass2_filtered: 142,
-		verified_findings: 42,
-		avg_cost_saved: '$720.00',
-		uptime: '99.98%'
+		total_reviews: 0,
+		pass1_candidates: 0,
+		pass2_filtered: 0,
+		verified_findings: 0,
+		avg_cost_saved: '$0.00',
+		uptime: '0s'
 	});
 
-	let reviews = $state<ReviewRecord[]>([
-		{
-			id: 'rev-01',
-			repo: 'kleinbem/nix-config',
-			pr_number: 505,
-			title: 'feat(fleet): enable Forgejo on mac-mini and revue daemon on nixos-nvme',
-			author: 'martin',
-			forge: 'github',
-			created_at: 'Just now',
-			duration_secs: 14,
-			provider_used: 'Google Gemini (Subscription)',
-			findings_count: 2,
-			pass1_candidates: 6,
-			pass2_verified: 2,
-			lines_added: 52,
-			lines_removed: 8,
-			triage_status: 'now',
-			risk_level: 'medium',
-			summary:
-				'Evaluated fleet configurations across mac-mini and nixos-nvme. Identified systemd ProtectHome access collision and WireGuard interface firewall exposure.',
-			findings: [
-				{
-					file: 'nix/hosts/nixos-nvme/configuration.nix',
-					line: 42,
-					severity: 'warning',
-					title: 'Antigravity CLI requires write access to ~/.gemini while ProtectHome is read-only',
-					body: 'Systemd ProtectHome="read-only" prevents antigravity-cli from persisting auth state. Add ReadWritePaths = [ "/home/${cfg.user}/.gemini" ] to systemd service configuration.',
-					snippet: 'systemd.services.revue.serviceConfig = {\n  ProtectHome = "read-only";\n+ ReadWritePaths = [ "/home/${cfg.user}/.gemini" ];\n};',
-					confidence: 9,
-					category: 'Stability & Systemd Sandbox'
-				},
-				{
-					file: 'nix/inventory.nix',
-					line: 78,
-					severity: 'info',
-					title: 'Ensure internal DNS entry matches Caddy proxy upstream',
-					body: 'revue.kleinbem.dev routes to nixos-nvme:8383 over WireGuard wt0 interface. Verify port 8383 is permitted in networking.firewall.interfaces.wt0.allowedTCPPorts.',
-					snippet: 'networking.firewall.interfaces."wt0".allowedTCPPorts = [ 8383 ];',
-					confidence: 10,
-					category: 'Zero-Trust Network Routing'
-				}
-			]
-		},
-		{
-			id: 'rev-02',
-			repo: 'kleinbem/nix-config',
-			pr_number: 489,
-			title: 'fix(network): hass-pi hairpin routing and Music Assistant ports',
-			author: 'martin',
-			forge: 'forgejo',
-			created_at: '2 hours ago',
-			duration_secs: 31,
-			provider_used: 'Google Gemini (Subscription)',
-			findings_count: 2,
-			pass1_candidates: 5,
-			pass2_verified: 2,
-			lines_added: 18,
-			lines_removed: 4,
-			triage_status: 'now',
-			risk_level: 'low',
-			summary:
-				'Pass 1 identified 5 anomalies in the bridge NAT rules. Pass 2 Judge confirmed asymmetric routing failure on container bridge cbr0 and missing Zero-Trust rules for Music Assistant ports 8095/8097, filtering out 3 false positives.',
-			findings: [
-				{
-					file: 'hosts/hass-pi/default.nix',
-					line: 42,
-					severity: 'error',
-					title: 'Hairpin NAT missing masquerade rule on cbr0',
-					body: 'Packets hairpinned back to container bridge cbr0 will retain the original source IP, causing container TCP connections to be rejected due to asymmetric return path.',
-					confidence: 9,
-					snippet: 'nft add rule ip nat POSTROUTING oifname "cbr0" masquerade',
-					category: 'Data Integrity & NAT Routing'
-				},
-				{
-					file: 'hosts/hass-pi/network.nix',
-					line: 78,
-					severity: 'warning',
-					title: 'Music Assistant airlock missing stream ports',
-					body: 'AirPlay and DLNA announcement ports (8095, 8097) are omitted from the firewall whitelist.',
-					confidence: 8,
-					snippet: 'interfaces."cbr0".allowedTCPPorts = [ 8095 8097 ];',
-					category: 'Firewall & Service Airlock'
-				}
-			]
-		},
-		{
-			id: 'rev-03',
-			repo: 'kleinbem/kleinbem',
-			pr_number: 37,
-			title: 'chore: rename nix-revue repo to revue',
-			author: 'martin',
-			forge: 'github',
-			created_at: '3 hours ago',
-			duration_secs: 8,
-			provider_used: 'Gemini 2.5 Flash',
-			findings_count: 0,
-			pass1_candidates: 3,
-			pass2_verified: 0,
-			lines_added: 6,
-			lines_removed: 6,
-			triage_status: 'next',
-			risk_level: 'low',
-			summary:
-				'Reviewed fleet conductor repository rename. All git remote bindings and conductor submodules properly mapped to git@github.com:kleinbem-dev/revue.git. Clean pass with 0 issues.',
-			findings: []
-		}
-	]);
+	let reviews = $state<ReviewRecord[]>([]);
 
 	let selectedReview = $state<ReviewRecord | null>(null);
 	let isTriggerOpen = $state(false);
@@ -234,7 +128,7 @@
 			const res = await fetch('/api/reviews');
 			if (res.ok) {
 				const data = await res.json();
-				if (Array.isArray(data) && data.length > 0) {
+				if (Array.isArray(data)) {
 					reviews = data.map((r: any) => ({
 						id: String(r.id ?? ''),
 						repo: String(r.repo ?? 'unknown/repo'),

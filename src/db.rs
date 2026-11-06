@@ -25,6 +25,8 @@ pub struct StoredReview {
     pub verified_findings: i64,
     pub cost_saved_usd: f64,
     pub duration_ms: i64,
+    pub summary: String,
+    pub findings_json: String,
     pub created_at: String,
 }
 
@@ -117,6 +119,8 @@ impl DbPool {
                 verified_findings INTEGER NOT NULL DEFAULT 0,
                 cost_saved_usd REAL NOT NULL DEFAULT 0.0,
                 duration_ms INTEGER NOT NULL DEFAULT 0,
+                summary TEXT NOT NULL DEFAULT '',
+                findings_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo, pr_number);
@@ -138,6 +142,13 @@ impl DbPool {
         .await
         .context("Failed to initialize SQLite schema")?;
 
+        let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN summary TEXT NOT NULL DEFAULT '';")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN findings_json TEXT NOT NULL DEFAULT '[]';")
+            .execute(pool)
+            .await;
+
         Ok(())
     }
 
@@ -157,6 +168,8 @@ impl DbPool {
                 verified_findings INTEGER NOT NULL DEFAULT 0,
                 cost_saved_usd DOUBLE PRECISION NOT NULL DEFAULT 0.0,
                 duration_ms BIGINT NOT NULL DEFAULT 0,
+                summary TEXT NOT NULL DEFAULT '',
+                findings_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo, pr_number);
@@ -178,9 +191,19 @@ impl DbPool {
         .await
         .context("Failed to initialize PostgreSQL schema")?;
 
+        sqlx::query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '';")
+            .execute(pool)
+            .await
+            .context("Failed to add reviews.summary column")?;
+        sqlx::query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS findings_json TEXT NOT NULL DEFAULT '[]';")
+            .execute(pool)
+            .await
+            .context("Failed to add reviews.findings_json column")?;
+
         Ok(())
     }
 
+    /// Records an executed review run into the persistent database with summary and findings.
     pub async fn record_review(
         &self,
         repo: &str,
@@ -194,6 +217,8 @@ impl DbPool {
         verified: i64,
         cost_saved: f64,
         duration_ms: i64,
+        summary: &str,
+        findings_json: &str,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
 
@@ -203,8 +228,8 @@ impl DbPool {
                     r#"
                     INSERT INTO reviews (repo, pr_number, title, author, status, provider_used,
                                          pass1_candidates, pass2_filtered, verified_findings,
-                                         cost_saved_usd, duration_ms, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         cost_saved_usd, duration_ms, summary, findings_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
                 )
                 .bind(repo)
@@ -218,6 +243,8 @@ impl DbPool {
                 .bind(verified)
                 .bind(cost_saved)
                 .bind(duration_ms)
+                .bind(summary)
+                .bind(findings_json)
                 .bind(now)
                 .execute(pool)
                 .await?;
@@ -229,8 +256,8 @@ impl DbPool {
                     r#"
                     INSERT INTO reviews (repo, pr_number, title, author, status, provider_used,
                                          pass1_candidates, pass2_filtered, verified_findings,
-                                         cost_saved_usd, duration_ms, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                         cost_saved_usd, duration_ms, summary, findings_json, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     RETURNING id
                     "#,
                 )
@@ -245,6 +272,8 @@ impl DbPool {
                 .bind(verified)
                 .bind(cost_saved)
                 .bind(duration_ms)
+                .bind(summary)
+                .bind(findings_json)
                 .bind(now)
                 .fetch_one(pool)
                 .await?;
@@ -305,6 +334,7 @@ impl DbPool {
         }
     }
 
+    /// Lists the most recently recorded reviews up to the specified limit.
     pub async fn list_recent_reviews(&self, limit: i64) -> Result<Vec<StoredReview>> {
         let mut reviews = Vec::new();
 
@@ -314,7 +344,7 @@ impl DbPool {
                     r#"
                     SELECT id, repo, pr_number, title, author, status, provider_used,
                            pass1_candidates, pass2_filtered, verified_findings,
-                           cost_saved_usd, duration_ms, created_at
+                           cost_saved_usd, duration_ms, summary, findings_json, created_at
                     FROM reviews
                     ORDER BY id DESC
                     LIMIT ?
@@ -338,6 +368,8 @@ impl DbPool {
                         verified_findings: r.get("verified_findings"),
                         cost_saved_usd: r.get("cost_saved_usd"),
                         duration_ms: r.get("duration_ms"),
+                        summary: r.get("summary"),
+                        findings_json: r.get("findings_json"),
                         created_at: r.get("created_at"),
                     });
                 }
@@ -347,7 +379,7 @@ impl DbPool {
                     r#"
                     SELECT id, repo, pr_number, title, author, status, provider_used,
                            pass1_candidates, pass2_filtered, verified_findings,
-                           cost_saved_usd, duration_ms, created_at
+                           cost_saved_usd, duration_ms, summary, findings_json, created_at
                     FROM reviews
                     ORDER BY id DESC
                     LIMIT $1
@@ -371,6 +403,8 @@ impl DbPool {
                         verified_findings: r.get("verified_findings"),
                         cost_saved_usd: r.get("cost_saved_usd"),
                         duration_ms: r.get("duration_ms"),
+                        summary: r.get("summary"),
+                        findings_json: r.get("findings_json"),
                         created_at: r.get("created_at"),
                     });
                 }
@@ -604,6 +638,8 @@ mod tests {
                 4,
                 75.50,
                 1420,
+                "Automated review verified 4 defects.",
+                "[]",
             )
             .await
             .expect("Should record review");
@@ -623,6 +659,8 @@ mod tests {
             .expect("Should list reviews");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].repo, "kleinbem/nix-config");
+        assert_eq!(recent[0].summary, "Automated review verified 4 defects.");
+        assert_eq!(recent[0].findings_json, "[]");
     }
 
     #[tokio::test]
