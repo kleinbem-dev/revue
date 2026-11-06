@@ -86,11 +86,15 @@ cargo install --git https://github.com/kleinbem-dev/revue
 docker run -d \
   --name revue \
   -p 8383:8383 \
+  -v revue-data:/var/lib/revue \
   -e REVUE_WEBHOOK_SECRET="your-webhook-secret" \
   -e FORGEJO_TOKEN="your-forgejo-token" \
   -e GITHUB_TOKEN="your-github-token" \
   ghcr.io/kleinbem-dev/revue:latest
 ```
+
+> [!NOTE]
+> If bind-mounting a host directory to `/var/lib/revue`, ensure the directory is writable by container UID 10001 (runtime user `revue`). For rootful Docker use `chown -R 10001:10001 ./revue-data`; for rootless Podman use `podman unshare chown -R 10001:10001 ./revue-data`.
 
 ### 3. Nix Flake (Any Linux / macOS)
 

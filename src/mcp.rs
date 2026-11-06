@@ -170,14 +170,16 @@ pub async fn run_mcp_server(config_path: Option<&str>) -> Result<()> {
             }
 
             _ => {
-                let err_resp = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32601, "message": format!("Method not found: {}", req.method) }
-                });
-                stdout.write_all(err_resp.to_string().as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+                if !id.is_null() {
+                    let err_resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": format!("Method not found: {}", req.method) }
+                    });
+                    stdout.write_all(err_resp.to_string().as_bytes()).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
+                }
                 continue;
             }
         };
