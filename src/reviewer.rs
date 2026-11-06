@@ -228,13 +228,14 @@ fn parse_semgrep_findings_with_spans(raw_json: &str) -> Vec<(ReviewIssue, Option
 pub async fn run_semgrep_pass0(
     diff: &ParsedDiff,
     config: &RevueConfig,
-    repo_path: Option<&std::path::Path>,
+    scan_root: Option<&std::path::Path>,
+    trusted_rules_root: Option<&std::path::Path>,
 ) -> Vec<ReviewIssue> {
     if !config.review.semgrep || diff.files.is_empty() {
         return Vec::new();
     }
 
-    let root = match repo_path {
+    let root = match scan_root {
         Some(r) => r,
         None => {
             tracing::debug!("No local checkout path provided for Semgrep Pass 0; skipping");
@@ -267,19 +268,83 @@ pub async fn run_semgrep_pass0(
         return Vec::new();
     }
 
+    // Resolve trusted Semgrep configuration from daemon settings or canonical host checkout,
+    // NEVER from the untrusted PR checkout root.
     let config_arg = if let Some(cfg) = &config.review.semgrep_config {
-        Some(cfg.clone())
-    } else if root.join(".semgrep").exists() {
-        Some(root.join(".semgrep").to_string_lossy().to_string())
-    } else if root.join(".semgrep.yml").exists() {
-        Some(root.join(".semgrep.yml").to_string_lossy().to_string())
-    } else if root.join(".semgrep.yaml").exists() {
-        Some(root.join(".semgrep.yaml").to_string_lossy().to_string())
+        let p = std::path::Path::new(cfg);
+        if let Ok(canon) = p.canonicalize() {
+            Some(canon.to_string_lossy().to_string())
+        } else if cfg.starts_with("p/")
+            || cfg.starts_with("r/")
+            || cfg.starts_with("s/")
+            || cfg.starts_with("http://")
+            || cfg.starts_with("https://")
+        {
+            // Valid Semgrep registry ID or URL
+            Some(cfg.clone())
+        } else if cfg == "auto" {
+            // Note: Semgrep CLI rejects '--config auto' when '--metrics=off' is passed.
+            // Upstream: semgrep/semgrep#11649 (open)
+            tracing::warn!(
+                "Semgrep '--config auto' requires metrics; with '--metrics=off' this fails before scanning. Specify an explicit ruleset like 'p/default'."
+            );
+            Some(cfg.clone())
+        } else {
+            // Local file/directory path that does not exist or cannot be canonicalized
+            tracing::warn!(
+                "Rejecting unresolvable local Semgrep config path: {}",
+                cfg
+            );
+            return Vec::new();
+        }
+    } else if let Some(trusted) = trusted_rules_root {
+        if trusted.join(".semgrep").exists() {
+            trusted.join(".semgrep").canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+        } else if trusted.join(".semgrep.yml").exists() {
+            trusted.join(".semgrep.yml").canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+        } else if trusted.join(".semgrep.yaml").exists() {
+            trusted.join(".semgrep.yaml").canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+        } else {
+            None
+        }
     } else {
-        tracing::debug!(
-            "No Semgrep rules configuration (.semgrep/ or .semgrep.yml) found; skipping Pass 0"
-        );
-        return Vec::new();
+        None
+    };
+
+    // When scanning an untrusted PR checkout distinct from the trusted rules checkout,
+    // ensure resolved config does not reside within the scan root.
+    if let (Some(scan), Some(ref cfg_str)) = (scan_root, &config_arg) {
+        let is_distinct_checkout = match trusted_rules_root {
+            Some(trusted) => match (scan.canonicalize(), trusted.canonicalize()) {
+                (Ok(s), Ok(t)) => s != t,
+                _ => true,
+            },
+            None => true,
+        };
+        if is_distinct_checkout {
+            if let Ok(scan_canon) = scan.canonicalize() {
+                let cfg_path = std::path::Path::new(cfg_str);
+                if let Ok(cfg_canon) = cfg_path.canonicalize() {
+                    if cfg_canon.starts_with(&scan_canon) {
+                        tracing::warn!(
+                            "Rejecting Semgrep config resolving inside PR checkout: {:?}",
+                            cfg_canon
+                        );
+                        return Vec::new();
+                    }
+                }
+            }
+        }
+    }
+
+    let config_arg = match config_arg {
+        Some(c) => Some(c),
+        None => {
+            tracing::debug!(
+                "No trusted Semgrep rules configuration (.semgrep/ or .semgrep.yml) found; skipping Pass 0"
+            );
+            return Vec::new();
+        }
     };
 
     let semgrep_bin = std::env::var("SEMGREP_BIN").unwrap_or_else(|_| "semgrep".to_string());
@@ -704,13 +769,14 @@ pub async fn execute_review_pipeline(
     chain: &ProviderChain,
     false_positives: &[crate::db::FindingFeedback],
     repo_path: Option<&std::path::Path>,
+    trusted_rules_root: Option<&std::path::Path>,
     intent: Option<&PrMetadata>,
     existing_comments: &[crate::forges::DiscussionComment],
 ) -> Result<ReviewExecutionResult> {
     let start_time = std::time::Instant::now();
     let pass0_issues = if config.review.semgrep {
         info!("Executing Review Pass 0 (Semgrep AST scan)...");
-        run_semgrep_pass0(diff, config, repo_path).await
+        run_semgrep_pass0(diff, config, repo_path, trusted_rules_root).await
     } else {
         Vec::new()
     };
@@ -828,7 +894,7 @@ pub async fn review_diff_content(
     let config = RevueConfig::find_and_load(config_path)?;
     let parsed = crate::diff::ParsedDiff::parse(raw_diff)?;
     let chain = build_provider_chain(&config);
-    let res = execute_review_pipeline(&parsed, &config, &chain, &[], None, None, &[]).await?;
+    let res = execute_review_pipeline(&parsed, &config, &chain, &[], None, None, None, &[]).await?;
     Ok((
         ReviewOutput {
             summary: res.summary,
@@ -869,6 +935,7 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
         &config,
         &chain,
         &[],
+        Some(std::path::Path::new(".")),
         Some(std::path::Path::new(".")),
         None,
         &[],
@@ -991,6 +1058,7 @@ pub async fn run_pr_review(
         .await
         .unwrap_or_default();
 
+    let host_repo = crate::tree::resolve_repo_root(repo);
     let chain = build_provider_chain(&config);
     let res = execute_review_pipeline(
         &parsed,
@@ -998,6 +1066,7 @@ pub async fn run_pr_review(
         &chain,
         &false_positives,
         local_checkout,
+        host_repo.as_deref(),
         Some(&metadata),
         &existing_comments,
     )

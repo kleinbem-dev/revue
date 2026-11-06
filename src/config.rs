@@ -13,10 +13,44 @@ pub struct RevueConfig {
     pub providers: ProvidersConfig,
     #[serde(default)]
     pub review: ReviewSection,
+    #[serde(default)]
+    pub server: ServerConfig,
 }
 
 fn default_version() -> u32 {
     1
+}
+
+/// Server listening and authentication settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// Default bind address (defaults to 127.0.0.1:8383)
+    #[serde(default = "default_bind_addr")]
+    pub bind: String,
+    /// Optional API key for authenticating /api routes (or set REVUE_API_KEY)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Allow unauthenticated webhooks (insecure testing mode only)
+    #[serde(default)]
+    pub insecure_webhooks: bool,
+    /// Allowed CORS origins
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
+}
+
+fn default_bind_addr() -> String {
+    "127.0.0.1:8383".to_string()
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_bind_addr(),
+            api_key: std::env::var("REVUE_API_KEY").ok(),
+            insecure_webhooks: false,
+            cors_origins: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +224,7 @@ impl Default for RevueConfig {
             forge: ForgeConfig::default(),
             providers: ProvidersConfig::default(),
             review: ReviewSection::default(),
+            server: ServerConfig::default(),
         }
     }
 }
@@ -240,6 +275,10 @@ impl RevueConfig {
 
         if cfg.forge.webhook_secret.is_none() {
             cfg.forge.webhook_secret = std::env::var("REVUE_WEBHOOK_SECRET").ok();
+        }
+
+        if cfg.server.api_key.is_none() {
+            cfg.server.api_key = std::env::var("REVUE_API_KEY").ok();
         }
 
         Ok(cfg)

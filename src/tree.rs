@@ -4,8 +4,24 @@ use tracing::{debug, info, warn};
 
 /// Resolves the filesystem root of the given repository against current working directory or fleet roots.
 pub fn resolve_repo_root(repo_arg: &str) -> Option<PathBuf> {
+    // Reject path traversal components, git metadata, and disallowed hidden components (allow exact .github)
+    if repo_arg.split('/').any(|seg| {
+        seg == ".."
+            || seg == "."
+            || seg == ".git"
+            || (seg.starts_with('.') && seg != ".github")
+    }) {
+        return None;
+    }
+
     let repo_basename = repo_arg.rsplit('/').next().unwrap_or(repo_arg);
-    if repo_basename.is_empty() || repo_basename == "." {
+    if repo_basename.is_empty()
+        || repo_basename == ".git"
+        || (repo_basename != ".github"
+            && !repo_basename
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+    {
         return None;
     }
 
@@ -286,5 +302,27 @@ impl EphemeralTreeGuard {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_repo_root_traversal_rejected() {
+        assert!(resolve_repo_root("../evil").is_none());
+        assert!(resolve_repo_root("foo/../bar").is_none());
+        assert!(resolve_repo_root("foo/../../etc/passwd").is_none());
+        assert!(resolve_repo_root("..").is_none());
+        assert!(resolve_repo_root(".git").is_none());
+        assert!(resolve_repo_root("foo/.git").is_none());
+        assert!(resolve_repo_root("foo/.hidden").is_none());
+        assert!(resolve_repo_root("evil;rm -rf /").is_none());
+        assert!(resolve_repo_root("evil$foo").is_none());
+
+        // Exact .github repository is permitted by validation
+        // (will return None if not present in CWD/fleet checkout, but doesn't fail early traversal checks)
+        let _ = resolve_repo_root("kleinbem/.github");
     }
 }
