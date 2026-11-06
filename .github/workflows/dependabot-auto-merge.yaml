@@ -1,0 +1,14 @@
+name: Dependabot auto-merge
+
+on: pull_request
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    permissions:
+      pull-requests: read
+    uses: kleinbem/actions/.github/workflows/dependabot-auto-merge.yaml@a1647881d0d61e4d5b299a054c3ec1e0ace1ebba # v1.2.2
+    secrets:
+      app-id: ${{ secrets.APP_ID }}
+      app-private-key: ${{ secrets.APP_PRIVATE_KEY }}

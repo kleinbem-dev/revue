@@ -1,0 +1,9 @@
+{
+  "id": "eval-02-intentional-sha256",
+  "name": "Standard Content Digest Checksum",
+  "description": "Standard SHA-256 hash computed for artifact cache verification. Often naively flagged as weak cryptography or hardcoded secret.",
+  "diff": "diff --git a/src/cache.rs b/src/cache.rs\n--- a/src/cache.rs\n+++ b/src/cache.rs\n@@ -10,3 +10,4 @@\n+    let mut hasher = sha2::Sha256::new();\n+    hasher.update(payload.as_bytes());\n+    let digest = hex::encode(hasher.finalize());\n",
+  "expected_type": "false_positive_trap",
+  "expected_dismissal": true,
+  "expected_file": "src/cache.rs"
+}

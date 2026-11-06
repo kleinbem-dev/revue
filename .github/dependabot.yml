@@ -1,0 +1,51 @@
+version: 2
+updates:
+  # Patch/minor merge on their own (dependabot-auto-merge.yaml); the cooldown
+  # keeps freshly published, possibly compromised releases out.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    ignore:
+      # svelte-check and @sveltejs/kit only accept TypeScript 5/6. Drop once
+      # sveltejs/kit#17537 and sveltejs/language-tools#3063 ship TS 7 support.
+      - dependency-name: typescript
+        versions: [">= 7"]
+    cooldown:
+      default-days: 7
+      semver-minor-days: 7
+      semver-major-days: 14
+    groups:
+      # These pin each other's peer ranges, so they move together. Majors get
+      # their own group so they don't hold back the auto-mergeable bumps.
+      svelte:
+        patterns: ["svelte", "@sveltejs/*", "vite", "svelte-check"]
+        update-types: ["minor", "patch"]
+      svelte-major:
+        patterns: ["svelte", "@sveltejs/*", "vite", "svelte-check"]
+        update-types: ["major"]
+      npm-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo-dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

@@ -1,0 +1,60 @@
+# nix-revue configuration
+# Schema version
+version: 1
+
+# Forge configuration
+forge:
+  # "forgejo", "gitea", "github", or "auto" (detected from git remote)
+  type: auto
+  # Base URL for Forgejo (used when forge is self-hosted)
+  url: "https://git.kleinbem.dev"
+
+# Multi-model provider cascade (primary -> fallback 1 -> fallback 2)
+providers:
+  cascade:
+    - claude-cli   # Non-interactive `claude -p` (uses your active subscription)
+    - gemini       # Google Gemini 2.0 Flash (free tier API)
+    - ollama       # Local offline GPU inference
+
+  ollama_url: "http://127.0.0.1:11434"
+  ollama_model: "qwen2.5-coder:14b"
+  gemini_model: "gemini-2.0-flash"
+
+# Review settings and inspection rules
+review:
+  language: en-GB
+  tone: "Short and direct. Lead with the problem and the fix. No praise, no filler."
+  
+  # Minimum severity level to post inline comments: info | warning | error | critical
+  min_severity: warning
+
+  # Glob patterns to ignore
+  ignore:
+    - "**/flake.lock"
+    - "**/Cargo.lock"
+    - "**/package-lock.json"
+    - "dist/**"
+    - "target/**"
+
+  # Path-specific rules and domain instructions
+  rules:
+    - path: "**"
+      instructions: |
+        Every workaround or fix for someone else's bug needs an upstream issue link.
+        Flag workarounds without one.
+
+    - path: "**/*.nix"
+      instructions: |
+        NixOS checks:
+        - Ensure sops secrets are gated by their feature enable option.
+        - Host /var is tmpfs: check for missing persistence entries.
+        - No plaintext secrets.
+
+    - path: "**/*.rs"
+      instructions: |
+        Check for unwrap() in production paths, missing error propagation,
+        and potential deadlocks.
+
+    - path: "**/*.sh"
+      instructions: |
+        Scripts run under `set -euo pipefail`: flag unbound variables and unquoted expansions.
