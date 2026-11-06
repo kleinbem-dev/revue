@@ -1,0 +1,15 @@
+{
+  "id": "eval-03-silent-error-drop",
+  "name": "Silent Error Suppression in Critical Path",
+  "description": "PR intent claims to refactor telemetry flush, but diff silently drops write error with let _ = writer.flush().",
+  "intent": {
+    "title": "refactor: optimize telemetry buffer flushing",
+    "description": "Streamlines flushing logic across log destinations without behavior changes.",
+    "author": "bob"
+  },
+  "diff": "diff --git a/src/telemetry.rs b/src/telemetry.rs\n--- a/src/telemetry.rs\n+++ b/src/telemetry.rs\n@@ -88,3 +88,2 @@\n-    writer.flush()?;\n+    let _ = writer.flush();\n",
+  "expected_type": "intent_violation",
+  "expected_category": "bug",
+  "expected_min_severity": "warning",
+  "expected_file": "src/telemetry.rs"
+}

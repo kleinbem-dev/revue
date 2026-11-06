@@ -10,6 +10,10 @@ readme = "README.md"
 keywords = ["code-review", "ai", "github", "forgejo", "gemini"]
 categories = ["development-tools", "command-line-utilities"]
 
+[lib]
+name = "revue"
+path = "src/lib.rs"
+
 [[bin]]
 name = "revue"
 path = "src/main.rs"

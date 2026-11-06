@@ -1,4 +1,4 @@
-use super::{Forge, InlineReviewComment};
+use super::{DiscussionComment, Forge, InlineReviewComment, PrMetadata};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
@@ -70,6 +70,145 @@ impl Forge for GitHubClient {
         res.text()
             .await
             .map_err(|e| anyhow!("Failed to read diff: {}", e))
+    }
+
+    async fn fetch_pr_metadata(&self, repo: &str, pr_index: u64) -> Result<PrMetadata> {
+        let url = format!("https://api.github.com/repos/{}/pulls/{}", repo, pr_index);
+        let res = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch PR metadata from GitHub: {}", e))?;
+
+        if !res.status().is_success() {
+            return Err(anyhow!(
+                "Failed to get PR metadata from GitHub (status {}): {}",
+                res.status(),
+                res.text().await.unwrap_or_default()
+            ));
+        }
+
+        let val: serde_json::Value = res.json().await?;
+        let title = val.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let description = val.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let author = val
+            .get("user")
+            .and_then(|u| u.get("login"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let head_sha = val
+            .get("head")
+            .and_then(|h| h.get("sha"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let base_ref = val
+            .get("base")
+            .and_then(|b| b.get("ref"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let labels = val
+            .get("labels")
+            .and_then(|l| l.as_array())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|item| item.get("name").and_then(|n| n.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(PrMetadata {
+            title,
+            description,
+            author,
+            head_sha,
+            base_ref,
+            labels,
+        })
+    }
+
+    async fn fetch_pr_comments(
+        &self,
+        repo: &str,
+        pr_index: u64,
+    ) -> Result<Vec<DiscussionComment>> {
+        let mut comments = Vec::new();
+
+        // 1. Fetch inline review comments
+        let pulls_url = format!(
+            "https://api.github.com/repos/{}/pulls/{}/comments?per_page=100",
+            repo, pr_index
+        );
+        if let Ok(res) = self.client.get(&pulls_url).send().await {
+            if res.status().is_success() {
+                if let Ok(val) = res.json::<serde_json::Value>().await {
+                    if let Some(arr) = val.as_array() {
+                        for item in arr {
+                            if let Some(body) = item.get("body").and_then(|b| b.as_str()) {
+                                let author = item
+                                    .get("user")
+                                    .and_then(|u| u.get("login"))
+                                    .and_then(|l| l.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                let path = item
+                                    .get("path")
+                                    .and_then(|p| p.as_str())
+                                    .map(String::from);
+                                let line = item
+                                    .get("line")
+                                    .or_else(|| item.get("original_line"))
+                                    .and_then(|l| l.as_u64());
+
+                                comments.push(DiscussionComment {
+                                    author,
+                                    path,
+                                    line,
+                                    body: body.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fetch conversation comments
+        let issues_url = format!(
+            "https://api.github.com/repos/{}/issues/{}/comments?per_page=100",
+            repo, pr_index
+        );
+        if let Ok(res) = self.client.get(&issues_url).send().await {
+            if res.status().is_success() {
+                if let Ok(val) = res.json::<serde_json::Value>().await {
+                    if let Some(arr) = val.as_array() {
+                        for item in arr {
+                            if let Some(body) = item.get("body").and_then(|b| b.as_str()) {
+                                let author = item
+                                    .get("user")
+                                    .and_then(|u| u.get("login"))
+                                    .and_then(|l| l.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+
+                                comments.push(DiscussionComment {
+                                    author,
+                                    path: None,
+                                    line: None,
+                                    body: body.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(comments)
     }
 
     async fn post_review(

@@ -116,9 +116,24 @@ impl ParsedDiff {
     /// Enrich diff with actual surrounding file context from disk (like CodeRabbit AST context)
     pub fn enrich_with_disk_context(&mut self, root_dir: Option<&std::path::Path>) {
         let base = root_dir.unwrap_or_else(|| std::path::Path::new("."));
+        let canonical_base = base.canonicalize().ok();
 
         for f in &mut self.files {
             let file_path = base.join(&f.new_path);
+            if let Some(ref root) = canonical_base {
+                if let Ok(canon) = file_path.canonicalize() {
+                    if !canon.starts_with(root) {
+                        tracing::warn!(
+                            "Rejecting disk context path escaping base directory: {:?}",
+                            file_path
+                        );
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
             if file_path.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&file_path) {
                     let lines: Vec<&str> = content.lines().collect();

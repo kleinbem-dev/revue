@@ -29,7 +29,9 @@ pub struct Finding {
     pub line: u64,
     pub severity: String,
     pub title: String,
+    #[serde(alias = "comment")]
     pub body: String,
+    #[serde(default, alias = "suggestion")]
     pub snippet: Option<String>,
     pub confidence: Option<u8>,
     #[serde(default)]
@@ -182,10 +184,12 @@ struct RepositoryObject {
     full_name: Option<String>,
 }
 
+/// Health check endpoint returning simple plain text confirmation.
 async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, "revue daemon is healthy\n")
 }
 
+/// Returns daemon health, uptime, provider status, and aggregate review telemetry.
 async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let uptime_secs = state.start_time.elapsed().as_secs();
     let hours = uptime_secs / 3600;
@@ -222,24 +226,16 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
         let p1: u64 = reviews.iter().map(|r| r.pass1_candidates as u64).sum();
         let p2: u64 = reviews.iter().map(|r| r.pass2_verified as u64).sum();
         let filt = p1.saturating_sub(p2);
-        (total, p1, p2, filt, "$142.50".to_string())
+        (total, p1, p2, filt, "$0.00".to_string())
     };
 
     let metrics = DaemonMetrics {
-        total_reviews: total_reviews.max(1),
-        pass1_candidates: pass1.max(6),
-        pass2_filtered: filtered.max(4),
-        verified_findings: pass2.max(2),
-        avg_cost_saved: if cost_saved_str == "$0.00" {
-            "$142.50".to_string()
-        } else {
-            cost_saved_str
-        },
-        uptime: if uptime_str == "0m" {
-            "99.98%".to_string()
-        } else {
-            uptime_str
-        },
+        total_reviews,
+        pass1_candidates: pass1,
+        pass2_filtered: filtered,
+        verified_findings: pass2,
+        avg_cost_saved: cost_saved_str,
+        uptime: uptime_str,
     };
 
     let providers = vec![
@@ -295,34 +291,73 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
     })
 }
 
+/// Returns the list of recent pull request reviews from database and in-memory states.
 async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    // If no DB is configured, return all in-memory records directly.
+    if state.db.is_none() {
+        let reviews = state.reviews.read().await;
+        return Json(reviews.clone());
+    }
+
+    let mut records: Vec<ReviewRecord> = Vec::new();
+
+    // 1. In-memory running reviews
+    let running_records: Vec<ReviewRecord> = {
+        let reviews = state.reviews.read().await;
+        reviews
+            .iter()
+            .filter(|r| r.status == "running")
+            .cloned()
+            .collect()
+    };
+    records.extend(running_records.iter().cloned());
+
+    // 2. Persistent reviews from DB
     if let Some(db) = &state.db {
         if let Ok(db_reviews) = db.list_recent_reviews(50).await {
-            if !db_reviews.is_empty() {
-                let records: Vec<ReviewRecord> = db_reviews
-                    .into_iter()
-                    .map(|r| ReviewRecord {
-                        id: r.id.to_string(),
-                        repo: r.repo,
-                        pr_number: r.pr_number as u64,
-                        title: Some(r.title),
-                        status: r.status,
-                        pass1_candidates: r.pass1_candidates as u32,
-                        pass2_verified: r.verified_findings as u32,
-                        duration_secs: (r.duration_ms / 1000) as u64,
-                        provider_used: r.provider_used,
-                        created_at: r.created_at,
-                        summary: "Automated PR review verification completed.".to_string(),
-                        forge: "forgejo".to_string(),
-                        findings: Vec::new(),
-                    })
-                    .collect();
-                return Json(records);
+            for r in db_reviews {
+                // Skip DB record only if the same PR is actively running in-memory
+                if running_records
+                    .iter()
+                    .any(|rec| rec.repo == r.repo && rec.pr_number == r.pr_number as u64)
+                {
+                    continue;
+                }
+                let findings: Vec<Finding> =
+                    serde_json::from_str(&r.findings_json).unwrap_or_else(|err| {
+                        warn!("Failed to parse findings for review {}: {}", r.id, err);
+                        Vec::new()
+                    });
+                records.push(ReviewRecord {
+                    id: r.id.to_string(),
+                    repo: r.repo.clone(),
+                    pr_number: r.pr_number as u64,
+                    title: Some(r.title),
+                    status: r.status,
+                    pass1_candidates: r.pass1_candidates as u32,
+                    pass2_verified: r.verified_findings as u32,
+                    duration_secs: (r.duration_ms / 1000) as u64,
+                    provider_used: r.provider_used,
+                    created_at: r.created_at,
+                    summary: r.summary,
+                    forge: if r.repo.contains("git.") {
+                        "forgejo".to_string()
+                    } else {
+                        "github".to_string()
+                    },
+                    findings,
+                });
             }
         }
     }
-    let reviews = state.reviews.read().await;
-    Json(reviews.clone())
+
+    // 3. Fall back to all in-memory state if no records were found
+    if records.is_empty() {
+        let reviews = state.reviews.read().await;
+        return Json(reviews.clone());
+    }
+
+    Json(records)
 }
 
 async fn record_finding_feedback(
@@ -489,6 +524,7 @@ async fn handle_synthesize_rule(
     }
 }
 
+/// Triggers an asynchronous code review for the specified pull request.
 async fn trigger_review(
     State(state): State<Arc<ServerState>>,
     Json(req): Json<TriggerRequest>,
@@ -540,39 +576,77 @@ async fn trigger_review(
     tokio::spawn(async move {
         let start = std::time::Instant::now();
         let dry_run = !publish;
-        let result = run_pr_review(pr, Some(&repo_clone), dry_run, config_path.as_deref()).await;
-        let duration = start.elapsed().as_secs();
+        let result = run_pr_review(
+            pr,
+            Some(&repo_clone),
+            dry_run,
+            config_path.as_deref(),
+            state_clone.db.as_ref(),
+        )
+        .await;
+        let duration_ms = start.elapsed().as_millis() as u64;
 
         let mut reviews = state_clone.reviews.write().await;
         if let Some(r) = reviews.iter_mut().find(|r| r.id == review_id) {
             match result {
-                Ok(_) => {
+                Ok(res) => {
                     r.status = "completed".to_string();
-                    r.duration_secs = duration.max(2);
-                    r.pass1_candidates = 5;
-                    r.pass2_verified = 0;
-                    r.title = Some(format!("PR #{}: Verified and approved clean", pr));
-                    r.summary = if publish {
-                        format!("Two-pass review completed and submitted to {} PR #{}. Pass 1 discovered 5 candidates; Pass 2 Judge verified 0 actionable defects. PR approved clean.", repo_clone, pr)
-                    } else {
-                        "Two-pass review completed. Pass 1 detected 5 potential points of interest; Pass 2 Judge applied fleet negative constraints and confirmed 0 actionable defects. PR approved clean.".to_string()
-                    };
+                    r.duration_secs = (res.duration_ms / 1000).max(1);
+                    r.pass1_candidates = res.pass1_candidates as u32;
+                    r.pass2_verified = res.pass2_verified as u32;
+                    r.provider_used = res.provider_used;
+                    r.title = Some(format!("PR #{}: Review analysis completed", pr));
+                    r.summary = res.summary;
+                    r.findings = res
+                        .issues
+                        .iter()
+                        .map(|issue| Finding {
+                            file: issue.file.clone(),
+                            line: issue.line,
+                            severity: issue.severity.clone(),
+                            title: issue.title.clone(),
+                            body: issue.comment.clone(),
+                            snippet: issue.suggestion.clone(),
+                            confidence: issue.confidence,
+                            feedback: None,
+                        })
+                        .collect();
                     info!(
-                        "Manual review completed for {} #{} (published: {})",
-                        repo_clone, pr, publish
+                        "Manual review completed for {} #{} (published: {}, findings: {})",
+                        repo_clone,
+                        pr,
+                        publish,
+                        r.findings.len()
                     );
                 }
                 Err(e) => {
-                    r.status = "completed".to_string();
-                    r.duration_secs = duration.max(1);
-                    r.pass1_candidates = 3;
-                    r.pass2_verified = 0;
-                    r.title = Some(format!("PR #{}: Review analysis completed", pr));
-                    r.summary = format!("Analyzed PR changes for {} #{}. Pass 1 & Pass 2 verified no security boundary violations or syntax errors. Clean.", repo_clone, pr);
-                    info!(
-                        "Manual review completed with notice for {} #{}: {:?}",
+                    r.status = "failed".to_string();
+                    r.duration_secs = (duration_ms / 1000).max(1);
+                    r.title = Some(format!("PR #{}: Review failed", pr));
+                    r.summary = format!("Review pipeline failed: {}", e);
+                    error!(
+                        "Manual review failed for {} #{}: {:?}",
                         repo_clone, pr, e
                     );
+                    if let Some(db) = &state_clone.db {
+                        let _ = db
+                            .record_review(
+                                &repo_clone,
+                                pr as i64,
+                                &format!("PR #{}: Review failed", pr),
+                                "unknown",
+                                "failed",
+                                "error",
+                                0,
+                                0,
+                                0,
+                                0.0,
+                                duration_ms as i64,
+                                &format!("Review pipeline failed: {}", e),
+                                "[]",
+                            )
+                            .await;
+                    }
                 }
             }
         }
@@ -589,6 +663,7 @@ async fn trigger_review(
     )
 }
 
+/// Handles incoming forge webhook events (push, pull_request, comments).
 async fn handle_webhook(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -715,21 +790,45 @@ async fn handle_webhook(
 
     let config_path = state.config_path.clone();
     let repo_for_review = repo.clone();
+    let state_clone = state.clone();
 
     // Spawn review asynchronously in background so webhook returns 200 immediately
     tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let db_opt = state_clone.db.as_ref();
         if let Err(e) = run_pr_review(
             pr_num,
             Some(&repo_for_review),
             false,
             config_path.as_deref(),
+            db_opt,
         )
         .await
         {
+            let duration_ms = start.elapsed().as_millis() as u64;
             error!(
                 "Failed to execute review for {} #{}: {:?}",
                 repo_for_review, pr_num, e
             );
+            if let Some(db) = db_opt {
+                let _ = db
+                    .record_review(
+                        &repo_for_review,
+                        pr_num as i64,
+                        &format!("PR #{}: Webhook review failed", pr_num),
+                        "unknown",
+                        "failed",
+                        "error",
+                        0,
+                        0,
+                        0,
+                        0.0,
+                        duration_ms as i64,
+                        &format!("Webhook review execution failed: {}", e),
+                        "[]",
+                    )
+                    .await;
+            }
         }
     });
 
@@ -737,88 +836,6 @@ async fn handle_webhook(
         StatusCode::ACCEPTED,
         format!("Review queued for {} #{}", repo, pr_num),
     )
-}
-
-fn seed_initial_reviews() -> Vec<ReviewRecord> {
-    vec![
-        ReviewRecord {
-            id: "rev-505".to_string(),
-            repo: "kleinbem/nix-config".to_string(),
-            pr_number: 505,
-            title: Some("feat: enable forgejo git service and revue code review daemon".to_string()),
-            status: "completed".to_string(),
-            pass1_candidates: 6,
-            pass2_verified: 2,
-            duration_secs: 14,
-            provider_used: "Gemini 2.5 Pro (Subscription)".to_string(),
-            created_at: "2026-11-02 04:30:00 UTC".to_string(),
-            summary: "Revue analyzed changes across 6 files. Pass 1 detected 6 potential issues (nix syntax, security bounds, secret permissions). Pass 2 verified 2 high-confidence recommendations with clean diffs.".to_string(),
-            forge: "github".to_string(),
-            findings: vec![
-                Finding {
-                    file: "nix/hosts/nixos-nvme/configuration.nix".to_string(),
-                    line: 42,
-                    severity: "warning".to_string(),
-                    title: "Antigravity CLI requires write access to ~/.gemini while ProtectHome is read-only".to_string(),
-                    body: "Systemd ProtectHome='read-only' prevents antigravity-cli from persisting auth state. Add ReadWritePaths = [ '/home/${cfg.user}/.gemini' ] to systemd service configuration.".to_string(),
-                    snippet: Some("systemd.services.revue.serviceConfig = {\n  ProtectHome = \"read-only\";\n+ ReadWritePaths = [ \"/home/${cfg.user}/.gemini\" ];\n};".to_string()),
-                    confidence: Some(9),
-                    feedback: None,
-                },
-                Finding {
-                    file: "nix/inventory.nix".to_string(),
-                    line: 78,
-                    severity: "info".to_string(),
-                    title: "Ensure internal DNS entry matches Caddy proxy upstream".to_string(),
-                    body: "revue.kleinbem.dev routes to nixos-nvme:8383 over WireGuard wt0 interface. Verify port 8383 is permitted in networking.firewall.interfaces.wt0.allowedTCPPorts.".to_string(),
-                    snippet: None,
-                    confidence: Some(10),
-                    feedback: None,
-                },
-            ],
-        },
-        ReviewRecord {
-            id: "rev-37".to_string(),
-            repo: "kleinbem/kleinbem".to_string(),
-            pr_number: 37,
-            title: Some("chore: rename nix-revue repo to revue".to_string()),
-            status: "completed".to_string(),
-            pass1_candidates: 3,
-            pass2_verified: 1,
-            duration_secs: 8,
-            provider_used: "Gemini 2.5 Flash".to_string(),
-            created_at: "2026-11-02 03:55:00 UTC".to_string(),
-            summary: "Reviewed fleet conductor repository rename. All git remote bindings and conductor submodules properly mapped to git@github.com:kleinbem-dev/revue.git.".to_string(),
-            forge: "github".to_string(),
-            findings: vec![
-                Finding {
-                    file: "repos.nix".to_string(),
-                    line: 12,
-                    severity: "info".to_string(),
-                    title: "Confirm conductor submodule update".to_string(),
-                    body: "Updated revue repo remote URL. Conductor sync clean.".to_string(),
-                    snippet: Some("- nix-revue = \"git@github.com:kleinbem-dev/nix-revue.git\";\n+ revue = \"git@github.com:kleinbem-dev/revue.git\";".to_string()),
-                    confidence: Some(10),
-                    feedback: None,
-                },
-            ],
-        },
-        ReviewRecord {
-            id: "rev-516".to_string(),
-            repo: "kleinbem/nix-config".to_string(),
-            pr_number: 516,
-            title: Some("feat(containers): register revue standalone container on container-factory".to_string()),
-            status: "completed".to_string(),
-            pass1_candidates: 2,
-            pass2_verified: 0,
-            duration_secs: 11,
-            provider_used: "Gemini 2.5 Flash".to_string(),
-            created_at: "2026-11-02 16:58:22 UTC".to_string(),
-            summary: "Analyzed container factory registration and pre-warm configuration across 2 files. Pass 1 surfaced 2 potential lint candidates. Pass 2 Judge verified clean NixOS module imports and zero regressions. Auto-approved.".to_string(),
-            forge: "github".to_string(),
-            findings: Vec::new(),
-        },
-    ]
 }
 
 async fn add_cache_headers(req: Request, next: Next) -> Response {
@@ -841,6 +858,7 @@ async fn add_cache_headers(req: Request, next: Next) -> Response {
     res
 }
 
+/// Starts the HTTP daemon serving the review API, web dashboard, and webhook receiver.
 pub async fn run_daemon(
     listen: &str,
     config_path: Option<&str>,
@@ -883,7 +901,7 @@ pub async fn run_daemon(
         webhook_secret: resolved_secret,
         start_time: Instant::now(),
         db,
-        reviews: Arc::new(RwLock::new(seed_initial_reviews())),
+        reviews: Arc::new(RwLock::new(Vec::new())),
     });
 
     let cors = CorsLayer::new()
@@ -1064,6 +1082,28 @@ mod tests {
         assert_eq!(
             payload.repository.unwrap().full_name.as_deref(),
             Some("kleinbem/nix-config")
+        );
+    }
+
+    #[test]
+    fn test_finding_deserialization_round_trip() {
+        let serialized_issues = r#"[
+            {
+                "file": "src/main.rs",
+                "line": 42,
+                "severity": "warning",
+                "title": "Unchecked error return",
+                "comment": "File write result is discarded",
+                "suggestion": "std::fs::write(path, data)?;"
+            }
+        ]"#;
+
+        let findings: Vec<Finding> = serde_json::from_str(serialized_issues).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].body, "File write result is discarded");
+        assert_eq!(
+            findings[0].snippet.as_deref(),
+            Some("std::fs::write(path, data)?;")
         );
     }
 }

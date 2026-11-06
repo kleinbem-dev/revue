@@ -1,6 +1,8 @@
 use crate::config::RevueConfig;
 use crate::diff::ParsedDiff;
-use crate::forges::{forgejo::ForgejoClient, github::GitHubClient, Forge, InlineReviewComment};
+use crate::forges::{
+    forgejo::ForgejoClient, github::GitHubClient, Forge, InlineReviewComment, PrMetadata,
+};
 use crate::providers::{
     antigravity::AntigravityCliProvider, claude::ClaudeCliProvider, gemini::GeminiProvider,
     mesh_llm::MeshLlmProvider, ollama::OllamaProvider, Provider, ProviderChain,
@@ -18,7 +20,8 @@ pub struct ReviewOutput {
     pub issues: Vec<ReviewIssue>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// An actionable finding or recommendation produced during code review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewIssue {
     pub file: String,
     pub line: u64,
@@ -27,12 +30,26 @@ pub struct ReviewIssue {
     pub title: String,
     pub comment: String,
     pub suggestion: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<u8>,
+}
+
+/// The verified execution output of the review pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewExecutionResult {
+    pub summary: String,
+    pub issues: Vec<ReviewIssue>,
+    pub provider_used: String,
+    pub pass1_candidates: usize,
+    pub pass2_verified: usize,
+    pub duration_ms: u64,
 }
 
 fn default_severity() -> String {
     "warning".to_string()
 }
 
+/// Constructs the prioritized provider cascade from configuration.
 pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
     let mut providers: Vec<Box<dyn Provider>> = Vec::new();
 
@@ -200,6 +217,7 @@ fn parse_semgrep_findings_with_spans(raw_json: &str) -> Vec<(ReviewIssue, Option
                     title,
                     comment: crate::scrubber::scrub_diff(&res.extra.message).0,
                     suggestion: res.extra.fix.map(|fix| crate::scrubber::scrub_diff(&fix).0),
+                    confidence: Some(10),
                 },
                 end_line,
             )
@@ -224,11 +242,24 @@ pub async fn run_semgrep_pass0(
         }
     };
 
+    let canonical_root = root.canonicalize().ok();
     let valid_targets: Vec<String> = diff
         .files
         .iter()
         .map(|f| f.new_path.clone())
-        .filter(|p| root.join(p).is_file())
+        .filter(|p| {
+            let full_path = root.join(p);
+            if !full_path.is_file() {
+                return false;
+            }
+            if let Some(ref canon_root) = canonical_root {
+                if let Ok(canon_file) = full_path.canonicalize() {
+                    return canon_file.starts_with(canon_root);
+                }
+                return false;
+            }
+            true
+        })
         .collect();
 
     if valid_targets.is_empty() {
@@ -332,6 +363,7 @@ pub async fn run_semgrep_pass0(
     relevant_findings
 }
 
+/// Merges deterministic Pass 0 AST findings into the review output without duplicates.
 pub fn merge_pass0_findings(review: &mut ReviewOutput, pass0_issues: Vec<ReviewIssue>) {
     if pass0_issues.is_empty() {
         return;
@@ -349,10 +381,32 @@ pub fn merge_pass0_findings(review: &mut ReviewOutput, pass0_issues: Vec<ReviewI
     }
 }
 
+/// Formats PR metadata and author intent into prompt markdown.
+fn format_intent(intent: Option<&PrMetadata>) -> String {
+    let mut s = String::new();
+    if let Some(meta) = intent {
+        s.push_str("\nPULL REQUEST INTENT & CONTEXT:\n");
+        s.push_str(&format!("- Title: {}\n", meta.title));
+        if !meta.author.is_empty() {
+            s.push_str(&format!("- Author: {}\n", meta.author));
+        }
+        if !meta.labels.is_empty() {
+            s.push_str(&format!("- Labels: {}\n", meta.labels.join(", ")));
+        }
+        if !meta.description.trim().is_empty() {
+            s.push_str(&format!("- Description:\n{}\n", meta.description.trim()));
+        }
+        s.push_str("Evaluate whether the code changes actually fulfill this stated intent and do not introduce regressions or omit necessary implementation details.\n");
+    }
+    s
+}
+
+/// Generates the Pass 1 Detective prompt for broad defect discovery.
 pub fn generate_pass1_detective_prompt(
     diff: &ParsedDiff,
     config: &RevueConfig,
     pass0_findings: &[ReviewIssue],
+    intent: Option<&PrMetadata>,
 ) -> String {
     let mut rules_text = String::new();
     for rule in &config.review.rules {
@@ -363,6 +417,7 @@ pub fn generate_pass1_detective_prompt(
     }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
+    let intent_text = format_intent(intent);
 
     let mut pass0_text = String::new();
     if !pass0_findings.is_empty() {
@@ -392,7 +447,7 @@ Your task is PASS 1: Broad Defect Discovery.
 
 Carefully examine the git diff and the surrounding file context below.
 Discover all potential defects, edge cases, subtle logic bugs, security holes, concurrency issues, and broken assumptions.
-
+{intent_text}
 REPOSITORY RULES:
 {rules_text}
 {skills_text}
@@ -412,15 +467,47 @@ CODE UNDER REVIEW:
     )
 }
 
+/// Generates the Pass 2 Judge prompt for rigorous defect verification and filtering.
 pub fn generate_pass2_judge_prompt(
     diff: &ParsedDiff,
     config: &RevueConfig,
     candidates: &str,
     false_positives: &[crate::db::FindingFeedback],
+    pass0_findings: &[ReviewIssue],
+    intent: Option<&PrMetadata>,
+    comments: &[crate::forges::DiscussionComment],
 ) -> String {
     let tone = &config.review.tone;
+    let mut rules_text = String::new();
+    for rule in &config.review.rules {
+        rules_text.push_str(&format!(
+            "- For files matching `{}`: {}\n",
+            rule.path, rule.instructions
+        ));
+    }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
+    let intent_text = format_intent(intent);
+
+    let mut pass0_text = String::new();
+    if !pass0_findings.is_empty() {
+        pass0_text.push_str("\nDETERMINISTIC AST RULES (PASS 0 FINDINGS):\n");
+        pass0_text.push_str("Static AST analysis (Semgrep) flagged the following rule violations in modified code:\n");
+        for finding in pass0_findings {
+            pass0_text.push_str(&format!(
+                "- [{}] `{}:{}` - {}: {}\n",
+                finding.severity.to_uppercase(),
+                finding.file,
+                finding.line,
+                finding.title,
+                finding.comment
+            ));
+            if let Some(sugg) = &finding.suggestion {
+                pass0_text.push_str(&format!("  Suggested Fix: {}\n", sugg.trim()));
+            }
+        }
+        pass0_text.push_str("Evaluate whether these AST findings represent genuine actionable issues in this context, or if they are mitigated/false positives.\n");
+    }
 
     let mut fp_text = String::new();
     if !false_positives.is_empty() {
@@ -436,7 +523,27 @@ pub fn generate_pass2_judge_prompt(
             }
             fp_text.push('\n');
         }
-        fp_text.push_str("If any candidate issue from Pass 1 matches or resembles these patterns, DISCARD it immediately as an intentional pattern.\n");
+        fp_text.push_str("If any candidate issue matches or resembles these patterns, DISCARD it immediately as an intentional pattern.\n");
+    }
+
+    let mut comments_text = String::new();
+    if !comments.is_empty() {
+        comments_text.push_str("\nEXISTING REVIEW COMMENTS & THREADS (DO NOT DUPLICATE THESE):\n");
+        comments_text.push_str("Earlier reviewers or automated checks have already commented on this PR:\n");
+        for c in comments {
+            let loc = match (&c.path, c.line) {
+                (Some(p), Some(l)) => format!("`{}:{}`", p, l),
+                (Some(p), None) => format!("`{}`", p),
+                _ => "general".to_string(),
+            };
+            comments_text.push_str(&format!(
+                "- @{} on {}: \"{}\"\n",
+                c.author,
+                loc,
+                c.body.replace('\n', " ").trim()
+            ));
+        }
+        comments_text.push_str("Do NOT repeat comments or suggestions that were already raised in these threads unless the code still blatantly violates requirements.\n");
     }
 
     format!(
@@ -447,21 +554,28 @@ Your task is PASS 2: Verification and Precision Filtering.
 
 In Pass 1, an auditor proposed the candidate concerns below.
 Your job is to rigorously evaluate each candidate against the actual code diff and surrounding context.
-
+{intent_text}
 CANDIDATE ISSUES FROM PASS 1:
 {candidates}
 
+REPOSITORY RULES:
+{rules_text}
+{skills_text}
+{pass0_text}
+{fp_text}
+{comments_text}
 VERIFICATION GUIDELINES:
 1. Verify if each issue is a TRUE DEFECT or a false positive (check if surrounding code already handles it, or if it is intentional).
 2. Verify the exact line number exists in the diff additions.
-3. Score each finding's confidence from 1 to 10. Discard anything below 8.
+3. Score each finding's confidence from 1 to 10. Only include verified issues with confidence >= 8.
 4. Eliminate all stylistic nits and subjective opinions. Keep only verified, actionable defects.
-5. Provide a raw code replacement in `suggestion` whenever possible.
+5. If evaluating Pass 0 Semgrep findings, confirm whether the flagged code is genuinely problematic in its context. Discard false positives.
+6. Provide a raw code replacement in `suggestion` whenever possible.
+7. Do not duplicate or contradict feedback already provided in the existing review comment threads.
 
 TONE INSTRUCTIONS:
 {tone}
-{skills_text}
-{fp_text}
+
 OUTPUT FORMAT:
 Output ONLY a single valid JSON object matching this schema:
 {{
@@ -471,6 +585,7 @@ Output ONLY a single valid JSON object matching this schema:
       "file": "path/to/file.ext",
       "line": 42,
       "severity": "bug|security|performance|warning",
+      "confidence": 9,
       "title": "Short title describing the defect",
       "comment": "Why this is an issue and how to resolve it",
       "suggestion": "optional replacement code"
@@ -484,10 +599,12 @@ CODE UNDER REVIEW:
     )
 }
 
+/// Generates a single-pass review prompt when two-pass pipeline is disabled.
 pub fn generate_single_pass_prompt(
     diff: &ParsedDiff,
     config: &RevueConfig,
     pass0_findings: &[ReviewIssue],
+    intent: Option<&PrMetadata>,
 ) -> String {
     let tone = &config.review.tone;
     let mut rules_text = String::new();
@@ -499,6 +616,7 @@ pub fn generate_single_pass_prompt(
     }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff);
+    let intent_text = format_intent(intent);
 
     let mut pass0_text = String::new();
     if !pass0_findings.is_empty() {
@@ -524,7 +642,7 @@ pub fn generate_single_pass_prompt(
 
 You are an expert, highly critical code reviewer.
 Review the following git diff and output ONLY a valid JSON object matching the requested schema.
-
+{intent_text}
 TONE INSTRUCTIONS:
 {tone}
 
@@ -546,6 +664,7 @@ SCHEMA:
       "file": "path/to/file.ext",
       "line": 42,
       "severity": "bug|security|performance|warning",
+      "confidence": 9,
       "title": "Short title describing the defect",
       "comment": "Why this is an issue and how to resolve it",
       "suggestion": "optional replacement code"
@@ -559,13 +678,36 @@ DIFF AND CONTEXT:
     )
 }
 
+/// Filters candidate issues based on confidence threshold (>= 8) and minimum severity.
+fn filter_issues(issues: &mut Vec<ReviewIssue>, config: &RevueConfig) {
+    // 1. Enforce confidence threshold >= 8
+    issues.retain(|i| i.confidence.unwrap_or(10) >= 8);
+
+    // 2. Enforce min_severity threshold
+    fn severity_rank(sev: &str) -> u8 {
+        match sev.to_lowercase().as_str() {
+            "security" | "critical" => 4,
+            "bug" | "error" => 3,
+            "performance" | "warning" => 2,
+            "info" | "style" => 1,
+            _ => 2,
+        }
+    }
+    let min_rank = severity_rank(&config.review.min_severity);
+    issues.retain(|i| severity_rank(&i.severity) >= min_rank);
+}
+
+/// Executes the multi-pass review pipeline against the given parsed diff.
 pub async fn execute_review_pipeline(
     diff: &ParsedDiff,
     config: &RevueConfig,
     chain: &ProviderChain,
     false_positives: &[crate::db::FindingFeedback],
     repo_path: Option<&std::path::Path>,
-) -> Result<(ReviewOutput, String)> {
+    intent: Option<&PrMetadata>,
+    existing_comments: &[crate::forges::DiscussionComment],
+) -> Result<ReviewExecutionResult> {
+    let start_time = std::time::Instant::now();
     let pass0_issues = if config.review.semgrep {
         info!("Executing Review Pass 0 (Semgrep AST scan)...");
         run_semgrep_pass0(diff, config, repo_path).await
@@ -581,27 +723,61 @@ pub async fn execute_review_pipeline(
 
     if !config.review.two_pass {
         info!("Running single-pass review pipeline");
-        let prompt = generate_single_pass_prompt(diff, config, &pass0_issues);
+        let prompt = generate_single_pass_prompt(diff, config, &pass0_issues, intent);
         let (resp, prov) = chain.complete_with_fallback(&prompt).await?;
         let mut parsed = parse_review_response(&resp)?;
         merge_pass0_findings(&mut parsed, pass0_issues);
-        return Ok((parsed, prov));
+        let raw_count = parsed.issues.len();
+        filter_issues(&mut parsed.issues, config);
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        let count = parsed.issues.len();
+        return Ok(ReviewExecutionResult {
+            summary: parsed.summary,
+            issues: parsed.issues,
+            provider_used: prov,
+            pass1_candidates: raw_count,
+            pass2_verified: count,
+            duration_ms,
+        });
     }
 
     info!("Executing Review Pass 1 (Detective - broad anomaly discovery)...");
-    let pass1_prompt = generate_pass1_detective_prompt(diff, config, &pass0_issues);
+    let pass1_prompt = generate_pass1_detective_prompt(diff, config, &pass0_issues, intent);
     let (pass1_candidates, provider_name) = chain.complete_with_fallback(&pass1_prompt).await?;
+    let candidates_count = pass1_candidates
+        .lines()
+        .filter(|l| l.starts_with("- ") || l.starts_with("* "))
+        .count();
 
     info!("Executing Review Pass 2 (Judge - verification & confidence filtering)...");
-    let pass2_prompt =
-        generate_pass2_judge_prompt(diff, config, &pass1_candidates, false_positives);
+    let pass2_prompt = generate_pass2_judge_prompt(
+        diff,
+        config,
+        &pass1_candidates,
+        false_positives,
+        &pass0_issues,
+        intent,
+        existing_comments,
+    );
     let (pass2_response, _) = chain.complete_with_fallback(&pass2_prompt).await?;
 
     let mut review = parse_review_response(&pass2_response)?;
-    merge_pass0_findings(&mut review, pass0_issues);
-    Ok((review, provider_name))
+    filter_issues(&mut review.issues, config);
+
+    let duration_ms = start_time.elapsed().as_millis() as u64;
+    let verified_count = review.issues.len();
+
+    Ok(ReviewExecutionResult {
+        summary: review.summary,
+        issues: review.issues,
+        provider_used: provider_name,
+        pass1_candidates: candidates_count,
+        pass2_verified: verified_count,
+        duration_ms,
+    })
 }
 
+/// Parses the LLM's completion output into structured review output.
 pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
     let trimmed = raw.trim();
     let json_str = if let Some(stripped) = trimmed.strip_prefix("```json") {
@@ -615,6 +791,7 @@ pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
     serde_json::from_str(json_str).with_context(|| format!("Failed to parse LLM JSON: {}", raw))
 }
 
+/// Fetches uncommitted local git or Jujutsu diff against base.
 fn fetch_local_diff(base: &str) -> Result<String> {
     // 1. Try `git diff <base>`
     if let Ok(output) = Command::new("git").args(["diff", base]).output() {
@@ -651,9 +828,17 @@ pub async fn review_diff_content(
     let config = RevueConfig::find_and_load(config_path)?;
     let parsed = crate::diff::ParsedDiff::parse(raw_diff)?;
     let chain = build_provider_chain(&config);
-    execute_review_pipeline(&parsed, &config, &chain, &[], None).await
+    let res = execute_review_pipeline(&parsed, &config, &chain, &[], None, None, &[]).await?;
+    Ok((
+        ReviewOutput {
+            summary: res.summary,
+            issues: res.issues,
+        },
+        res.provider_used,
+    ))
 }
 
+/// Runs a code review on local working copy diff against the specified base.
 pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>) -> Result<()> {
     let config = RevueConfig::find_and_load(config_path)?;
     info!("Running local diff review against '{}'", base);
@@ -679,26 +864,28 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     parsed.enrich_with_disk_context(None);
 
     let chain = build_provider_chain(&config);
-    let (review, provider_name) = execute_review_pipeline(
+    let res = execute_review_pipeline(
         &parsed,
         &config,
         &chain,
         &[],
         Some(std::path::Path::new(".")),
+        None,
+        &[],
     )
     .await?;
 
     if format == "json" {
-        println!("{}", serde_json::to_string_pretty(&review)?);
+        println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
-        println!("\n## nix-revue Analysis (Provider: {})\n", provider_name);
-        println!("{}\n", review.summary);
+        println!("\n## nix-revue Analysis (Provider: {})\n", res.provider_used);
+        println!("{}\n", res.summary);
 
-        if review.issues.is_empty() {
+        if res.issues.is_empty() {
             println!("🎉 **No issues found! Everything looks clean.**");
         } else {
-            println!("### Findings ({}):", review.issues.len());
-            for issue in &review.issues {
+            println!("### Findings ({}):", res.issues.len());
+            for issue in &res.issues {
                 println!(
                     "- **[{}] `{}:{}`** - **{}**\n  {}\n",
                     issue.severity.to_uppercase(),
@@ -717,31 +904,14 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     Ok(())
 }
 
-fn is_local_checkout_matching_repo(repo: &str) -> bool {
-    if let Ok(output) = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .output()
-    {
-        if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout);
-            let url = url.trim().trim_end_matches('/').trim_end_matches(".git");
-            let repo_path = repo.trim().trim_matches('/').trim_end_matches(".git");
-            let remote_path = match url.split_once("://") {
-                Some((_, rest)) => rest.split_once('/').map_or("", |(_, path)| path),
-                None => url.split_once(':').map_or("", |(_, path)| path),
-            };
-            return remote_path == repo_path;
-        }
-    }
-    false
-}
-
+/// Executes end-to-end pull request review with PR intent, ephemeral tree binding, and persistence.
 pub async fn run_pr_review(
     index: u64,
     repo_arg: Option<&str>,
     dry_run: bool,
     config_path: Option<&str>,
-) -> Result<()> {
+    db: Option<&crate::db::DbPool>,
+) -> Result<ReviewExecutionResult> {
     let config = RevueConfig::find_and_load(config_path)?;
     let repo = repo_arg.ok_or_else(|| anyhow!("--repo is required for PR review"))?;
 
@@ -763,18 +933,44 @@ pub async fn run_pr_review(
         Box::new(GitHubClient::new(config.forge.token.clone())?)
     };
 
+    info!("Fetching PR #{} metadata and intent for {}", index, repo);
+    let metadata = forge.fetch_pr_metadata(repo, index).await.unwrap_or_else(|e| {
+        tracing::warn!("Failed to fetch PR metadata (intent will be omitted): {}", e);
+        PrMetadata {
+            title: format!("PR #{}", index),
+            ..Default::default()
+        }
+    });
+
     info!("Fetching PR #{} diff for {}", index, repo);
     let raw_diff = forge.fetch_pr_diff(repo, index).await?;
+    if !metadata.head_sha.is_empty() {
+        if let Ok(after) = forge.fetch_pr_metadata(repo, index).await {
+            if !after.head_sha.is_empty() && after.head_sha != metadata.head_sha {
+                return Err(anyhow::anyhow!(
+                    "PR #{} head moved from {} to {} during fetch; rerun the review",
+                    index, metadata.head_sha, after.head_sha
+                ));
+            }
+        }
+    }
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
     parsed.apply_filters(&config.review.ignore);
 
-    // Enrich with local filesystem context only if working inside a checkout of the matching repo
-    let local_checkout = if is_local_checkout_matching_repo(repo) {
-        Some(std::path::Path::new("."))
+    // Ephemeral checkout at the exact PR head SHA for Semgrep and disk context
+    let tree_guard = if !metadata.head_sha.is_empty() {
+        crate::tree::EphemeralTreeGuard::prepare(repo, &metadata.head_sha, Some(index)).await
+    } else {
+        None
+    };
+
+    let local_checkout = if let Some(guard) = &tree_guard {
+        Some(guard.as_ref())
     } else {
         tracing::debug!(
-            "Current directory does not match target PR repository '{}'; skipping local checkout scan",
-            repo
+            "No ephemeral tree available for '{}' at head SHA '{}'; reviewing bare diff without AST scan",
+            repo,
+            metadata.head_sha
         );
         None
     };
@@ -783,12 +979,32 @@ pub async fn run_pr_review(
         parsed.enrich_with_disk_context(Some(path));
     }
 
+    let false_positives = if let Some(pool) = db {
+        pool.get_false_positives(repo, 20).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    info!("Fetching PR #{} comments and threads for {}", index, repo);
+    let existing_comments = forge
+        .fetch_pr_comments(repo, index)
+        .await
+        .unwrap_or_default();
+
     let chain = build_provider_chain(&config);
-    let (review, provider_name) =
-        execute_review_pipeline(&parsed, &config, &chain, &[], local_checkout).await?;
+    let res = execute_review_pipeline(
+        &parsed,
+        &config,
+        &chain,
+        &false_positives,
+        local_checkout,
+        Some(&metadata),
+        &existing_comments,
+    )
+    .await?;
 
     let mut inline_comments = Vec::new();
-    for issue in &review.issues {
+    for issue in &res.issues {
         if parsed.is_valid_line(&issue.file, issue.line) {
             let body = if let Some(sugg) = &issue.suggestion {
                 format!(
@@ -815,10 +1031,17 @@ pub async fn run_pr_review(
         "Pass 1 (Detective) → Pass 2 (Judge)"
     };
 
+    let head_sha_display = if metadata.head_sha.is_empty() {
+        "unknown"
+    } else {
+        &metadata.head_sha[..metadata.head_sha.len().min(8)]
+    };
+
     let summary = format!(
-        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}\n\n---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
-        provider_name,
-        review.summary,
+        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}\n\n---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Target Head:** `{}`\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
+        res.provider_used,
+        res.summary,
+        head_sha_display,
         parsed.files.len(),
         inline_comments.len(),
         pipeline_desc
@@ -835,7 +1058,32 @@ pub async fn run_pr_review(
             .await?;
     }
 
-    Ok(())
+    // Persist real review to database if available
+    if let Some(pool) = db {
+        let findings_json = serde_json::to_string(&res.issues).unwrap_or_else(|_| "[]".to_string());
+        if let Err(e) = pool
+            .record_review(
+                repo,
+                index as i64,
+                &metadata.title,
+                &metadata.author,
+                "completed",
+                &res.provider_used,
+                res.pass1_candidates as i64,
+                res.pass1_candidates.saturating_sub(res.pass2_verified) as i64,
+                res.pass2_verified as i64,
+                0.0,
+                res.duration_ms as i64,
+                &res.summary,
+                &findings_json,
+            )
+            .await
+        {
+            tracing::warn!("Failed to persist review for {} #{}: {}", repo, index, e);
+        }
+    }
+
+    Ok(res)
 }
 
 #[cfg(test)]
@@ -951,9 +1199,10 @@ mod tests {
             title: "AST Rule: unused-var".to_string(),
             comment: "Variable x is unused".to_string(),
             suggestion: Some("let _x = 1;".to_string()),
+            confidence: Some(10),
         }];
 
-        let prompt = generate_pass1_detective_prompt(&diff, &config, &pass0_findings);
+        let prompt = generate_pass1_detective_prompt(&diff, &config, &pass0_findings, None);
         assert!(prompt.contains("DETERMINISTIC AST RULES (PASS 0 FINDINGS):"));
         assert!(prompt.contains("AST Rule: unused-var"));
         assert!(prompt.contains("Variable x is unused"));
@@ -971,6 +1220,7 @@ mod tests {
                 title: "Semgrep Bug".to_string(),
                 comment: "Exact duplicate finding".to_string(),
                 suggestion: None,
+                confidence: Some(10),
             }],
         };
 
@@ -982,6 +1232,7 @@ mod tests {
                 title: "Semgrep Bug".to_string(),
                 comment: "Exact duplicate finding".to_string(),
                 suggestion: None,
+                confidence: Some(10),
             },
             ReviewIssue {
                 file: "src/main.rs".to_string(),
@@ -990,6 +1241,7 @@ mod tests {
                 title: "Distinct Sec Bug".to_string(),
                 comment: "Separate vulnerability on line 2".to_string(),
                 suggestion: None,
+                confidence: Some(10),
             },
             ReviewIssue {
                 file: "src/lib.rs".to_string(),
@@ -998,6 +1250,7 @@ mod tests {
                 title: "Semgrep Sec".to_string(),
                 comment: "New issue".to_string(),
                 suggestion: None,
+                confidence: Some(10),
             },
         ];
 
@@ -1006,5 +1259,120 @@ mod tests {
         assert_eq!(review.issues[0].title, "Semgrep Bug");
         assert_eq!(review.issues[1].title, "Distinct Sec Bug");
         assert_eq!(review.issues[2].title, "Semgrep Sec");
+    }
+
+    #[test]
+    fn test_pass1_detective_prompt_with_intent() {
+        let diff_str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,3 @@\n fn main() {\n+    println!(\"hello\");\n }\n";
+        let diff = ParsedDiff::parse(diff_str).unwrap();
+        let config = RevueConfig::default();
+        let metadata = PrMetadata {
+            title: "feat(greeting): add friendly welcome message".to_string(),
+            description: "Resolves #42 by printing greeting on boot".to_string(),
+            author: "alice".to_string(),
+            head_sha: "abcdef12".to_string(),
+            base_ref: "main".to_string(),
+            labels: vec!["enhancement".to_string()],
+        };
+
+        let prompt = generate_pass1_detective_prompt(&diff, &config, &[], Some(&metadata));
+        assert!(prompt.contains("PULL REQUEST INTENT & CONTEXT:"));
+        assert!(prompt.contains("Title: feat(greeting): add friendly welcome message"));
+        assert!(prompt.contains("Author: alice"));
+        assert!(prompt.contains("Description:\nResolves #42"));
+    }
+
+    #[test]
+    fn test_filter_issues_confidence_and_severity() {
+        let mut config = RevueConfig::default();
+        config.review.min_severity = "warning".to_string();
+
+        let mut issues = vec![
+            ReviewIssue {
+                file: "a.rs".to_string(),
+                line: 1,
+                severity: "info".to_string(), // Below min_severity "warning" -> discard
+                title: "Style note".to_string(),
+                comment: "Consider renaming".to_string(),
+                suggestion: None,
+                confidence: Some(9),
+            },
+            ReviewIssue {
+                file: "b.rs".to_string(),
+                line: 2,
+                severity: "bug".to_string(),
+                title: "Low confidence bug".to_string(),
+                comment: "Might fail".to_string(),
+                suggestion: None,
+                confidence: Some(6), // Below confidence 8 -> discard
+            },
+            ReviewIssue {
+                file: "c.rs".to_string(),
+                line: 3,
+                severity: "warning".to_string(),
+                title: "Valid warning".to_string(),
+                comment: "Resource leak".to_string(),
+                suggestion: None,
+                confidence: Some(8), // Meets both -> keep
+            },
+            ReviewIssue {
+                file: "d.rs".to_string(),
+                line: 4,
+                severity: "security".to_string(),
+                title: "Critical vulnerability".to_string(),
+                comment: "SQL Injection".to_string(),
+                suggestion: None,
+                confidence: Some(10), // Meets both -> keep
+            },
+        ];
+
+        filter_issues(&mut issues, &config);
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].title, "Valid warning");
+        assert_eq!(issues[1].title, "Critical vulnerability");
+    }
+
+    #[test]
+    fn test_pass2_judge_prompt_with_comments_and_false_positives() {
+        let diff_text = r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -10,1 +10,2 @@
++pub fn new_feature() {}
+"#;
+        let diff = ParsedDiff::parse(diff_text).unwrap();
+        let config = RevueConfig::default();
+        let fps = vec![crate::db::FindingFeedback {
+            id: 1,
+            repo: "owner/repo".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            issue_title: "Known false positive".to_string(),
+            feedback_type: "false_positive".to_string(),
+            reason: Some("Intentional fallback".to_string()),
+            created_at: "now".to_string(),
+        }];
+        let comments = vec![crate::forges::DiscussionComment {
+            author: "alice".to_string(),
+            path: Some("src/lib.rs".to_string()),
+            line: Some(10),
+            body: "Already verified in PR #1".to_string(),
+        }];
+
+        let prompt = generate_pass2_judge_prompt(
+            &diff,
+            &config,
+            "- Candidate issue 1",
+            &fps,
+            &[],
+            None,
+            &comments,
+        );
+
+        assert!(prompt.contains("PREVIOUSLY DISMISSED FALSE POSITIVES"));
+        assert!(prompt.contains("Known false positive"));
+        assert!(prompt.contains("Intentional fallback"));
+        assert!(prompt.contains("EXISTING REVIEW COMMENTS & THREADS"));
+        assert!(prompt.contains("@alice on `src/lib.rs:10`"));
+        assert!(prompt.contains("Already verified in PR #1"));
     }
 }

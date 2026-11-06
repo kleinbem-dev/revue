@@ -239,43 +239,7 @@ pub async fn validate_semgrep_rule(yaml_str: &str) -> Result<(), String> {
     res
 }
 
-/// Resolves the filesystem root of the given repository against current working directory or fleet roots.
-pub fn resolve_repo_root(repo_arg: &str) -> Option<PathBuf> {
-    let repo_basename = repo_arg.rsplit('/').next().unwrap_or(repo_arg);
-    if repo_basename.is_empty() || repo_basename == "." {
-        return None;
-    }
-
-    // 1. Current working directory
-    let cwd = PathBuf::from(".");
-    if cwd.join(".git").exists() || cwd.join(".jj").exists() {
-        if let Ok(canon) = cwd.canonicalize() {
-            if canon.file_name().and_then(|n| n.to_str()) == Some(repo_basename) {
-                return Some(canon);
-            }
-        }
-    }
-
-    // 2. Explicit workspace root from env
-    if let Ok(root) = std::env::var("KLEINBEM_WORKSPACE_ROOT") {
-        let p = PathBuf::from(root).join(repo_basename);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-
-    // 3. Default fleet checkout path: ~/Develop/github.com/kleinbem/<repo_basename>
-    if let Ok(home) = std::env::var("HOME") {
-        let p = PathBuf::from(home)
-            .join("Develop/github.com/kleinbem")
-            .join(repo_basename);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-
-    None
-}
+pub use crate::tree::resolve_repo_root;
 
 static FILE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
