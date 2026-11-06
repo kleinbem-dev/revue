@@ -7,7 +7,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM rust:1.85-alpine AS builder
+FROM rust:1.98-alpine AS builder
 
 WORKDIR /app
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static
