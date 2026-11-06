@@ -5,5 +5,7 @@
   "diff": "diff --git a/src/cache.rs b/src/cache.rs\n--- a/src/cache.rs\n+++ b/src/cache.rs\n@@ -10,3 +10,4 @@\n+    let mut hasher = sha2::Sha256::new();\n+    hasher.update(payload.as_bytes());\n+    let digest = hex::encode(hasher.finalize());\n",
   "expected_type": "false_positive_trap",
   "expected_dismissal": true,
-  "expected_file": "src/cache.rs"
+  "expected_file": "src/cache.rs",
+  "detective_response": "- In `src/cache.rs`: SHA-256 is used for cryptographic hashing; verify that this is not password hashing or weak crypto.",
+  "judge_response": "```json\n{\n  \"summary\": \"Standard SHA-256 artifact digest calculation\",\n  \"issues\": []\n}\n```"
 }

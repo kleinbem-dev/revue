@@ -6,5 +6,7 @@
   "expected_type": "true_positive",
   "expected_category": "security",
   "expected_min_severity": "critical",
-  "expected_file": "src/db.rs"
+  "expected_file": "src/db.rs",
+  "detective_response": "- In `src/db.rs`: Query is constructed via `format!` string interpolation with `user_input` instead of parameter binding. This creates a severe SQL injection vulnerability.",
+  "judge_response": "```json\n{\n  \"summary\": \"Fix critical SQL injection vulnerability in user query formatting\",\n  \"issues\": [\n    {\n      \"file\": \"src/db.rs\",\n      \"line\": 26,\n      \"severity\": \"critical\",\n      \"title\": \"SQL Injection via format! interpolation\",\n      \"comment\": \"Constructing SQL queries using `format!` allows arbitrary SQL injection. Use parameterized queries with `$1` or query parameters.\",\n      \"confidence\": 10,\n      \"suggestion\": \"sqlx::query(\\\"SELECT * FROM users WHERE username = $1\\\").bind(user_input).fetch_all(pool).await\"\n    }\n  ]\n}\n```"
 }

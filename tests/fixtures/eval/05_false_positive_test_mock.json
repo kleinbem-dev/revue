@@ -1,0 +1,11 @@
+{
+  "id": "eval-05-false-positive-test-mock",
+  "name": "Synthetic Mock Token in Unit Test",
+  "description": "Hardcoded synthetic JWT mock in test file, often falsely flagged as a credential leak by naive scanners",
+  "diff": "diff --git a/tests/mock_auth.rs b/tests/mock_auth.rs\n--- a/tests/mock_auth.rs\n+++ b/tests/mock_auth.rs\n@@ -12,2 +12,4 @@\n+    let mock_jwt_token = \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy_test_payload\";\n+    assert!(verify_token_format(mock_jwt_token));\n",
+  "expected_type": "false_positive_trap",
+  "expected_dismissal": true,
+  "expected_file": "tests/mock_auth.rs",
+  "detective_response": "- In `tests/mock_auth.rs`: Potential hardcoded JWT credential string in test source code.",
+  "judge_response": "```json\n{\n  \"summary\": \"Synthetic mock credential in unit test\",\n  \"issues\": []\n}\n```"
+}
