@@ -87,35 +87,20 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
     ProviderChain::new(providers)
 }
 
-fn format_diff_and_context(diff: &ParsedDiff) -> String {
-    let mut out = String::new();
-    for f in &diff.files {
-        out.push_str(&format!("=== MODIFIED FILE: {} ===\n", f.new_path));
-        out.push_str(&format!("--- a/{}\n+++ b/{}\n", f.new_path, f.new_path));
-        for h in &f.hunks {
-            out.push_str(&format!(
-                "@@ -{},{} +{},{} @@\n",
-                h.old_start, h.old_lines, h.new_start, h.new_lines
-            ));
-            for l in &h.lines {
-                out.push_str(l);
-                out.push('\n');
-            }
-        }
-
-        if let Some(ctx) = &f.file_context {
-            out.push_str(&format!(
-                "\n[SURROUNDING FILE CONTEXT FOR {} (numbered lines)]:\n",
-                f.new_path
-            ));
-            out.push_str(ctx);
-            out.push('\n');
-        }
-        out.push('\n');
+fn format_diff_and_context(diff: &ParsedDiff, max_tokens: usize) -> String {
+    let (formatted, stats) = diff.format_with_budget(max_tokens);
+    if stats.omitted_budget_files > 0 || stats.omitted_generated_files > 0 {
+        tracing::info!(
+            "Diff compressed for review: {} included, {} generated omitted, {} budget omitted (~{} tokens)",
+            stats.included_files,
+            stats.omitted_generated_files,
+            stats.omitted_budget_files,
+            stats.estimated_tokens
+        );
     }
 
     // DLP Guard: Scrub private keys, cloud tokens, and sensitive credentials
-    crate::scrubber::scrub_diff(&out).0
+    crate::scrubber::scrub_diff(&formatted).0
 }
 
 fn get_skills_block(diff: &ParsedDiff, config: &RevueConfig) -> String {
@@ -477,6 +462,9 @@ pub fn generate_pass1_detective_prompt(
     pass0_findings: &[ReviewIssue],
     intent: Option<&PrMetadata>,
 ) -> String {
+    config
+        .validate()
+        .expect("config must be valid before prompt generation");
     let mut rules_text = String::new();
     for rule in &config.review.rules {
         rules_text.push_str(&format!(
@@ -485,7 +473,7 @@ pub fn generate_pass1_detective_prompt(
         ));
     }
     let skills_text = get_skills_block(diff, config);
-    let code_content = format_diff_and_context(diff);
+    let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
     let intent_text = format_intent(intent);
 
     let mut pass0_text = String::new();
@@ -546,6 +534,9 @@ pub fn generate_pass2_judge_prompt(
     intent: Option<&PrMetadata>,
     comments: &[crate::forges::DiscussionComment],
 ) -> String {
+    config
+        .validate()
+        .expect("config must be valid before prompt generation");
     let tone = &config.review.tone;
     let mut rules_text = String::new();
     for rule in &config.review.rules {
@@ -555,7 +546,7 @@ pub fn generate_pass2_judge_prompt(
         ));
     }
     let skills_text = get_skills_block(diff, config);
-    let code_content = format_diff_and_context(diff);
+    let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
     let intent_text = format_intent(intent);
 
     let mut pass0_text = String::new();
@@ -676,6 +667,9 @@ pub fn generate_single_pass_prompt(
     pass0_findings: &[ReviewIssue],
     intent: Option<&PrMetadata>,
 ) -> String {
+    config
+        .validate()
+        .expect("config must be valid before prompt generation");
     let tone = &config.review.tone;
     let mut rules_text = String::new();
     for rule in &config.review.rules {
@@ -685,7 +679,7 @@ pub fn generate_single_pass_prompt(
         ));
     }
     let skills_text = get_skills_block(diff, config);
-    let code_content = format_diff_and_context(diff);
+    let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
     let intent_text = format_intent(intent);
 
     let mut pass0_text = String::new();

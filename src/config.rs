@@ -164,6 +164,9 @@ pub struct ReviewSection {
     pub language: String,
     #[serde(default = "default_min_severity")]
     pub min_severity: String,
+    /// Maximum estimated tokens allowed for the diff payload in review prompts (default 24,000)
+    #[serde(default = "default_max_diff_tokens")]
+    pub max_diff_tokens: usize,
     #[serde(default = "default_true")]
     pub summary: bool,
     #[serde(default = "default_true")]
@@ -192,6 +195,10 @@ fn default_min_severity() -> String {
     "warning".to_string()
 }
 
+fn default_max_diff_tokens() -> usize {
+    24_000
+}
+
 fn default_true() -> bool {
     true
 }
@@ -208,6 +215,7 @@ impl Default for ReviewSection {
             tone: default_tone(),
             language: default_language(),
             min_severity: default_min_severity(),
+            max_diff_tokens: default_max_diff_tokens(),
             summary: true,
             two_pass: true,
             semgrep: true,
@@ -266,6 +274,14 @@ impl RevueConfig {
         Ok(Self::default())
     }
 
+    /// Validates configuration invariants across file-loaded and programmatically constructed configs.
+    pub fn validate(&self) -> Result<()> {
+        if self.review.max_diff_tokens < 10 {
+            anyhow::bail!("review.max_diff_tokens must be at least 10 tokens");
+        }
+        Ok(())
+    }
+
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {:?}", path))?;
@@ -288,6 +304,8 @@ impl RevueConfig {
         if cfg.server.api_key.is_none() {
             cfg.server.api_key = std::env::var("REVUE_API_KEY").ok();
         }
+
+        cfg.validate()?;
 
         Ok(cfg)
     }
