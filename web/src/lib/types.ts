@@ -18,6 +18,7 @@ export interface ReviewRecord {
 	repo: string;
 	pr_number: number;
 	title?: string;
+	status?: 'running' | 'completed' | 'failed' | 'pending';
 	author?: string;
 	forge: 'github' | 'forgejo' | 'gitea';
 	created_at: string;

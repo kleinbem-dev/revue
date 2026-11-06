@@ -18,6 +18,12 @@ impl AntigravityCliProvider {
     }
 }
 
+impl Default for AntigravityCliProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Provider for AntigravityCliProvider {
     fn name(&self) -> &str {

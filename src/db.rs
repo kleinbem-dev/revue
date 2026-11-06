@@ -50,6 +50,24 @@ pub struct FindingFeedback {
     pub created_at: String,
 }
 
+/// Parameters for persisting an executed review record.
+#[derive(Debug, Clone)]
+pub struct NewReviewRecord<'a> {
+    pub repo: &'a str,
+    pub pr_number: i64,
+    pub title: &'a str,
+    pub author: &'a str,
+    pub status: &'a str,
+    pub provider_used: &'a str,
+    pub pass1: i64,
+    pub pass2: i64,
+    pub verified: i64,
+    pub cost_saved: f64,
+    pub duration_ms: i64,
+    pub summary: &'a str,
+    pub findings_json: &'a str,
+}
+
 pub fn default_database_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         return url;
@@ -204,22 +222,7 @@ impl DbPool {
     }
 
     /// Records an executed review run into the persistent database with summary and findings.
-    pub async fn record_review(
-        &self,
-        repo: &str,
-        pr_number: i64,
-        title: &str,
-        author: &str,
-        status: &str,
-        provider_used: &str,
-        pass1: i64,
-        pass2: i64,
-        verified: i64,
-        cost_saved: f64,
-        duration_ms: i64,
-        summary: &str,
-        findings_json: &str,
-    ) -> Result<i64> {
+    pub async fn record_review(&self, rec: &NewReviewRecord<'_>) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
 
         match self {
@@ -232,19 +235,19 @@ impl DbPool {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
                 )
-                .bind(repo)
-                .bind(pr_number)
-                .bind(title)
-                .bind(author)
-                .bind(status)
-                .bind(provider_used)
-                .bind(pass1)
-                .bind(pass2)
-                .bind(verified)
-                .bind(cost_saved)
-                .bind(duration_ms)
-                .bind(summary)
-                .bind(findings_json)
+                .bind(rec.repo)
+                .bind(rec.pr_number)
+                .bind(rec.title)
+                .bind(rec.author)
+                .bind(rec.status)
+                .bind(rec.provider_used)
+                .bind(rec.pass1)
+                .bind(rec.pass2)
+                .bind(rec.verified)
+                .bind(rec.cost_saved)
+                .bind(rec.duration_ms)
+                .bind(rec.summary)
+                .bind(rec.findings_json)
                 .bind(now)
                 .execute(pool)
                 .await?;
@@ -261,19 +264,19 @@ impl DbPool {
                     RETURNING id
                     "#,
                 )
-                .bind(repo)
-                .bind(pr_number)
-                .bind(title)
-                .bind(author)
-                .bind(status)
-                .bind(provider_used)
-                .bind(pass1)
-                .bind(pass2)
-                .bind(verified)
-                .bind(cost_saved)
-                .bind(duration_ms)
-                .bind(summary)
-                .bind(findings_json)
+                .bind(rec.repo)
+                .bind(rec.pr_number)
+                .bind(rec.title)
+                .bind(rec.author)
+                .bind(rec.status)
+                .bind(rec.provider_used)
+                .bind(rec.pass1)
+                .bind(rec.pass2)
+                .bind(rec.verified)
+                .bind(rec.cost_saved)
+                .bind(rec.duration_ms)
+                .bind(rec.summary)
+                .bind(rec.findings_json)
                 .bind(now)
                 .fetch_one(pool)
                 .await?;
@@ -626,21 +629,21 @@ mod tests {
             .expect("Should connect to in-memory sqlite");
 
         let id = db
-            .record_review(
-                "kleinbem/nix-config",
-                506,
-                "feat: update revue web",
-                "martin",
-                "completed",
-                "Mesh-LLM (Fleet P2P GPU)",
-                12,
-                8,
-                4,
-                75.50,
-                1420,
-                "Automated review verified 4 defects.",
-                "[]",
-            )
+            .record_review(&NewReviewRecord {
+                repo: "kleinbem/nix-config",
+                pr_number: 506,
+                title: "feat: update revue web",
+                author: "martin",
+                status: "completed",
+                provider_used: "Mesh-LLM (Fleet P2P GPU)",
+                pass1: 12,
+                pass2: 8,
+                verified: 4,
+                cost_saved: 75.50,
+                duration_ms: 1420,
+                summary: "Automated review verified 4 defects.",
+                findings_json: "[]",
+            })
             .await
             .expect("Should record review");
 

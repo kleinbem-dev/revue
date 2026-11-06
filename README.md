@@ -2,7 +2,7 @@
 
 > **Self-hosted, forge-agnostic AI code review engine with subscription fallback (Gemini, Claude, Ollama)**
 
-[![CI](https://github.com/kleinbem-dev/revue/actions/workflows/ci.yaml/badge.svg)](https://github.com/kleinbem-dev/revue/actions)
+[![CI](https://github.com/kleinbem-dev/revue/actions/workflows/ci.yml/badge.svg)](https://github.com/kleinbem-dev/revue/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Revue** is a self-hostable, forge-agnostic AI code review daemon and CLI tool built in Rust. It was designed as an open-source, subscription-friendly replacement for SaaS code review tools like CodeRabbit, built specifically to:
