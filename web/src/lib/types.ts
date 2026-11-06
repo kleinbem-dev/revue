@@ -57,7 +57,7 @@ export interface DaemonMetrics {
 
 export interface WizardConfig {
 	profile: 'quiet' | 'chill' | 'assertive';
-	auto_approvals: boolean;
+	auto_approvals?: boolean;
 	max_merge_risk: 'low' | 'medium' | 'high';
 	high_level_summary: boolean;
 	anti_slop: boolean;

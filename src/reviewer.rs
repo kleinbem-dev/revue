@@ -1195,10 +1195,16 @@ pub async fn run_pr_review(
         &metadata.head_sha[..metadata.head_sha.len().min(8)]
     };
 
+    let summary_text = if config.review.summary && !res.summary.trim().is_empty() {
+        format!("{}\n\n", res.summary.trim())
+    } else {
+        String::new()
+    };
+
     let summary = format!(
-        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}\n\n---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Target Head:** `{}`\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
+        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Target Head:** `{}`\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
         res.provider_used,
-        res.summary,
+        summary_text,
         head_sha_display,
         parsed.files.len(),
         inline_comments.len(),

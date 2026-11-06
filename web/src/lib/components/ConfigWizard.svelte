@@ -3,7 +3,6 @@
 
 	let config = $state<WizardConfig>({
 		profile: 'chill',
-		auto_approvals: false,
 		max_merge_risk: 'medium',
 		high_level_summary: true,
 		anti_slop: true,
@@ -16,43 +15,62 @@
 	let copied = $state(false);
 
 	const generatedYaml = $derived.by(() => {
+		const toneByProfile: Record<string, string> = {
+			chill: 'Short and direct. Lead with the problem and the fix. No praise, no filler.',
+			quiet: 'Concise and minimal. Only report actionable errors and critical issues. No praise.',
+			assertive: 'Strict and thorough. Flag potential regressions, security edge cases, and style issues.'
+		};
+
+		const severityByProfile: Record<string, string> = {
+			chill: 'warning',
+			quiet: 'error',
+			assertive: 'info'
+		};
+
 		const lines = [
 			'# yaml-language-server: $schema=https://revue.kleinbem.dev/schema.json',
 			'# Revue AI Code Review Configuration',
 			'version: 1',
 			'',
 			'review:',
-			`  profile: "${config.profile}"`,
-			`  high_level_summary: ${config.high_level_summary}`,
-			`  anti_slop: ${config.anti_slop}`,
-			`  auto_approvals: ${config.auto_approvals}`,
-			`  max_merge_risk: "${config.max_merge_risk}"`,
-			'',
-			'filters:',
-			'  ignore:'
+			`  tone: ${JSON.stringify(toneByProfile[config.profile] ?? toneByProfile.chill)}`,
+			`  min_severity: "${severityByProfile[config.profile] ?? 'warning'}"`,
+			`  summary: ${config.high_level_summary}`,
+			`  two_pass: ${config.anti_slop}`,
+			'  semgrep: true'
 		];
 
+		const ignores: string[] = [];
 		if (config.ignore_lockfiles) {
-			lines.push('    - "!**/*.lock"');
-			lines.push('    - "!**/flake.lock"');
-			lines.push('    - "!**/Cargo.lock"');
+			ignores.push('!**/*.lock', '!**/flake.lock', '!**/Cargo.lock', '!**/package-lock.json');
 		}
 		if (config.ignore_vendor) {
-			lines.push('    - "!**/vendor/**"');
-			lines.push('    - "!**/node_modules/**"');
+			ignores.push('!**/vendor/**', '!**/node_modules/**');
 		}
 		if (config.ignore_generated) {
-			lines.push('    - "!**/*.generated.*"');
-			lines.push('    - "!**/dist/**"');
-			lines.push('    - "!**/target/**"');
+			ignores.push('!**/*.generated.*', '!**/dist/**', '!**/target/**');
+		}
+
+		if (ignores.length > 0) {
+			lines.push('  ignore:');
+			for (const ig of ignores) {
+				lines.push(`    - "${ig}"`);
+			}
 		}
 
 		if (config.custom_guidelines.trim()) {
-			lines.push('');
-			lines.push('instructions:');
-			for (const l of config.custom_guidelines.split('\n')) {
-				if (l.trim()) {
-					lines.push(`  - "${l.replace(/"/g, '\\"')}"`);
+			lines.push('  rules:');
+			lines.push('    - path: "**/*"');
+			const guidelineLines = config.custom_guidelines
+				.split('\n')
+				.map((l) => l.trim())
+				.filter(Boolean);
+			if (guidelineLines.length === 1) {
+				lines.push(`      instructions: ${JSON.stringify(guidelineLines[0])}`);
+			} else if (guidelineLines.length > 1) {
+				lines.push('      instructions: |');
+				for (const gl of guidelineLines) {
+					lines.push(`        ${gl}`);
 				}
 			}
 		}
@@ -168,18 +186,10 @@
 
 					<label class="toggle-row">
 						<div>
-							<div class="t-name">Anti-Slop / Low-Quality PR Detection</div>
-							<div class="t-sub">Flag hallucinated or low-effort automated changes</div>
+							<div class="t-name">Two-Pass Verification (Detective + Judge)</div>
+							<div class="t-sub">Filter false positives using a second adversarial judge pass</div>
 						</div>
 						<input type="checkbox" bind:checked={config.anti_slop} />
-					</label>
-
-					<label class="toggle-row">
-						<div>
-							<div class="t-name">Automatic Approvals</div>
-							<div class="t-sub">Automatically submit an approval review when 0 issues are detected</div>
-						</div>
-						<input type="checkbox" bind:checked={config.auto_approvals} />
 					</label>
 				</div>
 			</div>

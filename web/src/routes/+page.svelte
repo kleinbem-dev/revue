@@ -103,7 +103,7 @@
 						pass2_filtered: Number(data.metrics.pass2_filtered ?? 0),
 						verified_findings: Number(data.metrics.verified_findings ?? 0),
 						avg_cost_saved: String(data.metrics.avg_cost_saved ?? '$0.00'),
-						uptime: String(data.metrics.uptime ?? '99.9%')
+						uptime: String(data.metrics.uptime ?? '0s')
 					};
 				}
 				if (Array.isArray(data?.providers)) {
@@ -134,6 +134,7 @@
 						repo: String(r.repo ?? 'unknown/repo'),
 						pr_number: Number(r.pr_number ?? 0),
 						title: r.title ? String(r.title) : undefined,
+						status: (r.status ?? 'completed') as 'running' | 'completed' | 'failed' | 'pending',
 						author: r.author ? String(r.author) : 'system',
 						forge: (r.forge ?? 'github') as 'github' | 'forgejo' | 'gitea',
 						created_at: String(r.created_at ?? 'Recently'),
@@ -142,10 +143,10 @@
 						findings_count: Array.isArray(r.findings) ? r.findings.length : 0,
 						pass1_candidates: Number(r.pass1_candidates ?? 0),
 						pass2_verified: Number(r.pass2_verified ?? 0),
-						lines_added: Number(r.lines_added ?? 24),
-						lines_removed: Number(r.lines_removed ?? 6),
-						triage_status: Array.isArray(r.findings) && r.findings.length > 0 ? 'now' : 'next',
-						risk_level: Array.isArray(r.findings) && r.findings.some((f: any) => f.severity === 'critical' || f.severity === 'error') ? 'medium' : 'low',
+						lines_added: r.lines_added !== undefined ? Number(r.lines_added) : undefined,
+						lines_removed: r.lines_removed !== undefined ? Number(r.lines_removed) : undefined,
+						triage_status: (r.status === 'failed' || r.status === 'running' || r.status === 'pending' || (Array.isArray(r.findings) && r.findings.length > 0)) ? 'now' : 'next',
+						risk_level: r.status === 'failed' ? 'high' : (Array.isArray(r.findings) && r.findings.some((f: any) => f.severity === 'critical' || f.severity === 'error') ? 'medium' : 'low'),
 						summary: String(r.summary ?? ''),
 						findings: Array.isArray(r.findings)
 							? r.findings.map((f: any) => ({
@@ -328,11 +329,21 @@
 											onkeydown={(e) => { if (e.key === 'Enter') selectedReview = review; }}
 										>
 											<div class="card-top-row">
-												<span class="priority-pill p2">● P2 Medium</span>
+												{#if review.status === 'failed'}
+													<span class="badge error">❌ Review Failed</span>
+												{:else if review.status === 'running'}
+													<span class="badge running">⏳ Analyzing...</span>
+												{:else if review.status === 'pending'}
+													<span class="badge pending">⏳ Pending...</span>
+												{:else}
+													<span class="priority-pill p2">● P2 Medium</span>
+												{/if}
 												<span class="forge-pill {review.forge}">{review.forge}</span>
-												<span class="diff-chip">
-													+{review.lines_added ?? 42} −{review.lines_removed ?? 14}
-												</span>
+												{#if review.lines_added !== undefined && review.lines_removed !== undefined}
+													<span class="diff-chip">
+														+{review.lines_added} −{review.lines_removed}
+													</span>
+												{/if}
 											</div>
 
 											<div class="card-pr-name">
@@ -383,11 +394,17 @@
 											<div class="card-top-row">
 												{#if review.status === 'running'}
 													<span class="badge running">⏳ Analyzing (Pass 1 & 2)...</span>
+												{:else if review.status === 'pending'}
+													<span class="badge pending">⏳ Pending...</span>
+												{:else if review.status === 'failed'}
+													<span class="badge error">❌ Review Failed</span>
 												{:else}
 													<span class="badge clean">✔ Approved Clean</span>
 												{/if}
 												<span class="forge-pill {review.forge}">{review.forge}</span>
-												<span class="diff-chip">+{review.lines_added ?? 6} −{review.lines_removed ?? 6}</span>
+												{#if review.lines_added !== undefined && review.lines_removed !== undefined}
+													<span class="diff-chip">+{review.lines_added} −{review.lines_removed}</span>
+												{/if}
 											</div>
 
 											<div class="card-pr-name">{review.repo} #{review.pr_number}</div>
@@ -448,7 +465,13 @@
 												</span>
 											</td>
 											<td>
-												{#if (review.findings ?? []).length === 0}
+												{#if review.status === 'running'}
+													<span class="badge running">Analyzing</span>
+												{:else if review.status === 'pending'}
+													<span class="badge pending">Pending</span>
+												{:else if review.status === 'failed'}
+													<span class="badge error">Failed</span>
+												{:else if (review.findings ?? []).length === 0}
 													<span class="badge clean">Clean (0)</span>
 												{:else}
 													<span class="badge issues">{review.findings.length} flagged</span>
@@ -974,6 +997,18 @@
 	.badge.clean {
 		background: rgba(16, 185, 129, 0.15);
 		color: #34d399;
+	}
+
+	.badge.pending {
+		background: rgba(148, 163, 184, 0.15);
+		color: #94a3b8;
+		border: 1px solid rgba(148, 163, 184, 0.3);
+	}
+
+	.badge.error {
+		background: rgba(239, 68, 68, 0.15);
+		color: #f87171;
+		border: 1px solid rgba(239, 68, 68, 0.3);
 	}
 
 	.badge.running {

@@ -41,8 +41,8 @@
 			: 0
 	);
 
-	const linesAdded = $derived(review.lines_added ?? 42);
-	const linesRemoved = $derived(review.lines_removed ?? 14);
+	const linesAdded = $derived(review.lines_added);
+	const linesRemoved = $derived(review.lines_removed);
 
 	function copyPatch(finding: Finding, id: string) {
 		const patchContent = finding.snippet || finding.body;
@@ -159,20 +159,26 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 			<!-- Hero Card 1: Diff Volume & Delta Bar -->
 			<div class="hero-card">
 				<div class="hero-label">Lines Changed</div>
-				<div class="hero-val">
-					<span class="add">+{linesAdded}</span>
-					<span class="del">−{linesRemoved}</span>
-				</div>
-				<div class="delta-bar-wrap">
-					<div
-						class="delta-bar-add"
-						style="width: {(linesAdded / (linesAdded + linesRemoved || 1)) * 100}%"
-					></div>
-					<div
-						class="delta-bar-del"
-						style="width: {(linesRemoved / (linesAdded + linesRemoved || 1)) * 100}%"
-					></div>
-				</div>
+				{#if linesAdded !== undefined && linesRemoved !== undefined}
+					<div class="hero-val">
+						<span class="add">+{linesAdded}</span>
+						<span class="del">−{linesRemoved}</span>
+					</div>
+					<div class="delta-bar-wrap">
+						<div
+							class="delta-bar-add"
+							style="width: {(linesAdded / (linesAdded + linesRemoved || 1)) * 100}%"
+						></div>
+						<div
+							class="delta-bar-del"
+							style="width: {(linesRemoved / (linesAdded + linesRemoved || 1)) * 100}%"
+						></div>
+					</div>
+				{:else}
+					<div class="hero-val">
+						<span class="diff-unavailable">—</span>
+					</div>
+				{/if}
 			</div>
 
 			<!-- Hero Card 2: Severity Distribution Chips -->
