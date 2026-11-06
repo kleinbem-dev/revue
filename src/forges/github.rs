@@ -40,6 +40,7 @@ impl GitHubClient {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))?;
 

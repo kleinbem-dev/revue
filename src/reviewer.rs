@@ -451,7 +451,10 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
     let mut s = String::new();
     if let Some(meta) = intent {
         s.push_str("\nPULL REQUEST INTENT & CONTEXT:\n");
-        s.push_str(&format!("- Title: {}\n", meta.title));
+        s.push_str(&format!(
+            "- Title: {}\n",
+            crate::scrubber::scrub_text(&meta.title)
+        ));
         if !meta.author.is_empty() {
             s.push_str(&format!("- Author: {}\n", meta.author));
         }
@@ -459,7 +462,8 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
             s.push_str(&format!("- Labels: {}\n", meta.labels.join(", ")));
         }
         if !meta.description.trim().is_empty() {
-            s.push_str(&format!("- Description:\n{}\n", meta.description.trim()));
+            let clean_desc = crate::scrubber::scrub_text(meta.description.trim());
+            s.push_str(&format!("- Description:\n```markdown\n{}\n```\n", clean_desc));
         }
         s.push_str("Evaluate whether the code changes actually fulfill this stated intent and do not introduce regressions or omit necessary implementation details.\n");
     }
@@ -601,11 +605,12 @@ pub fn generate_pass2_judge_prompt(
                 (Some(p), None) => format!("`{}`", p),
                 _ => "general".to_string(),
             };
+            let scrubbed_body = crate::scrubber::scrub_text(&c.body);
             comments_text.push_str(&format!(
                 "- @{} on {}: \"{}\"\n",
                 c.author,
                 loc,
-                c.body.replace('\n', " ").trim()
+                scrubbed_body.replace('\n', " ").trim()
             ));
         }
         comments_text.push_str("Do NOT repeat comments or suggestions that were already raised in these threads unless the code still blatantly violates requirements.\n");
@@ -745,8 +750,8 @@ DIFF AND CONTEXT:
 
 /// Filters candidate issues based on confidence threshold (>= 8) and minimum severity.
 fn filter_issues(issues: &mut Vec<ReviewIssue>, config: &RevueConfig) {
-    // 1. Enforce confidence threshold >= 8
-    issues.retain(|i| i.confidence.unwrap_or(10) >= 8);
+    // 1. Enforce confidence threshold >= 8. Missing confidence defaults to 0 (reject).
+    issues.retain(|i| i.confidence.unwrap_or(0) >= 8);
 
     // 2. Enforce min_severity threshold
     fn severity_rank(sev: &str) -> u8 {
@@ -844,18 +849,66 @@ pub async fn execute_review_pipeline(
     })
 }
 
+/// Extracts the most likely JSON object payload from LLM output.
+fn extract_json_payload(raw: &str) -> &str {
+    let trimmed = raw.trim();
+
+    // 1. Check for markdown code fences (```json ... ``` or ``` ... ```)
+    if let Some(start_idx) = trimmed.find("```") {
+        let after_fence = &trimmed[start_idx + 3..];
+        let content_start = if let Some(stripped) = after_fence.strip_prefix("json") {
+            stripped
+        } else {
+            after_fence
+        };
+        if let Some(end_idx) = content_start.rfind("```") {
+            let inner = content_start[..end_idx].trim();
+            if inner.starts_with('{') {
+                return inner;
+            }
+        }
+    }
+
+    // 2. Fall back to finding the outermost '{' and '}'
+    if let (Some(first_brace), Some(last_brace)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if first_brace < last_brace {
+            return trimmed[first_brace..=last_brace].trim();
+        }
+    }
+
+    trimmed
+}
+
 /// Parses the LLM's completion output into structured review output.
 pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
-    let trimmed = raw.trim();
-    let json_str = if let Some(stripped) = trimmed.strip_prefix("```json") {
-        stripped.strip_suffix("```").unwrap_or(stripped).trim()
-    } else if let Some(stripped) = trimmed.strip_prefix("```") {
-        stripped.strip_suffix("```").unwrap_or(stripped).trim()
-    } else {
-        trimmed
-    };
+    let json_str = extract_json_payload(raw);
+    if let Ok(review) = serde_json::from_str::<ReviewOutput>(json_str) {
+        return Ok(review);
+    }
 
-    serde_json::from_str(json_str).with_context(|| format!("Failed to parse LLM JSON: {}", raw))
+    // Try each fenced block in raw if an earlier non-JSON fence caused extraction failure
+    let mut fences = raw.split("```");
+    fences.next();
+    while let (Some(block), Some(_)) = (fences.next(), fences.next()) {
+        let block_clean = block.strip_prefix("json").unwrap_or(block).trim();
+        if let Ok(review) = serde_json::from_str::<ReviewOutput>(block_clean) {
+            return Ok(review);
+        }
+    }
+
+    serde_json::from_str(json_str).with_context(|| {
+        let preview = if raw.len() > 200 {
+            let cut = raw
+                .char_indices()
+                .nth(200)
+                .map(|(i, _)| i)
+                .unwrap_or(raw.len());
+            format!("{}... (truncated, total {} bytes)", &raw[..cut], raw.len())
+        } else {
+            raw.to_string()
+        };
+        format!("Failed to parse LLM JSON: {}", preview)
+    })
 }
 
 /// Fetches uncommitted local git or Jujutsu diff against base.
@@ -993,12 +1046,33 @@ pub async fn run_pr_review(
     };
 
     let forge: Box<dyn Forge> = if is_forgejo {
-        Box::new(ForgejoClient::new(
-            config.forge.url.clone(),
-            config.forge.token.clone(),
-        )?)
+        let token = config
+            .forge
+            .forgejo_token
+            .clone()
+            .or_else(|| std::env::var("FORGEJO_TOKEN").ok())
+            .or_else(|| {
+                if config.forge.r#type == "forgejo" || config.forge.r#type == "gitea" {
+                    config.forge.token.clone()
+                } else {
+                    None
+                }
+            });
+        Box::new(ForgejoClient::new(config.forge.url.clone(), token)?)
     } else {
-        Box::new(GitHubClient::new(config.forge.token.clone())?)
+        let token = config
+            .forge
+            .github_token
+            .clone()
+            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+            .or_else(|| {
+                if config.forge.r#type == "github" {
+                    config.forge.token.clone()
+                } else {
+                    None
+                }
+            });
+        Box::new(GitHubClient::new(token)?)
     };
 
     info!("Fetching PR #{} metadata and intent for {}", index, repo);
@@ -1075,7 +1149,21 @@ pub async fn run_pr_review(
 
     let mut inline_comments = Vec::new();
     for issue in &res.issues {
-        if parsed.is_valid_line(&issue.file, issue.line) {
+        let target_line = if parsed.is_added_line(&issue.file, issue.line) {
+            Some(issue.line)
+        } else if let Some(fallback) = parsed.find_first_added_line_in_range(
+            &issue.file,
+            issue.line.saturating_sub(3),
+            issue.line + 3,
+        ) {
+            Some(fallback)
+        } else if parsed.is_valid_line(&issue.file, issue.line) {
+            Some(issue.line)
+        } else {
+            None
+        };
+
+        if let Some(line) = target_line {
             let body = if let Some(sugg) = &issue.suggestion {
                 format!(
                     "**{}**: {}\n\n```suggestion\n{}\n```",
@@ -1089,7 +1177,7 @@ pub async fn run_pr_review(
 
             inline_comments.push(InlineReviewComment {
                 path: issue.file.clone(),
-                line: issue.line,
+                line,
                 body,
             });
         }
@@ -1347,7 +1435,7 @@ mod tests {
         assert!(prompt.contains("PULL REQUEST INTENT & CONTEXT:"));
         assert!(prompt.contains("Title: feat(greeting): add friendly welcome message"));
         assert!(prompt.contains("Author: alice"));
-        assert!(prompt.contains("Description:\nResolves #42"));
+        assert!(prompt.contains("Description:\n```markdown\nResolves #42"));
     }
 
     #[test]
@@ -1391,6 +1479,15 @@ mod tests {
                 comment: "SQL Injection".to_string(),
                 suggestion: None,
                 confidence: Some(10), // Meets both -> keep
+            },
+            ReviewIssue {
+                file: "e.rs".to_string(),
+                line: 5,
+                severity: "bug".to_string(),
+                title: "Missing confidence bug".to_string(),
+                comment: "Null dereference".to_string(),
+                suggestion: None,
+                confidence: None, // No confidence score -> discard
             },
         ];
 
@@ -1442,5 +1539,85 @@ mod tests {
         assert!(prompt.contains("EXISTING REVIEW COMMENTS & THREADS"));
         assert!(prompt.contains("@alice on `src/lib.rs:10`"));
         assert!(prompt.contains("Already verified in PR #1"));
+    }
+
+    #[test]
+    fn test_parse_review_response_surrounded_by_prose() {
+        let output = r#"
+Here is my full review of the submitted changes:
+
+```json
+{
+  "summary": "Looks good overall.",
+  "issues": [
+    {
+      "file": "src/main.rs",
+      "line": 42,
+      "severity": "bug",
+      "confidence": 9,
+      "title": "Off-by-one error",
+      "comment": "Loop index overflows length by 1",
+      "suggestion": null
+    }
+  ]
+}
+```
+
+Let me know if you need any follow-up adjustments!
+"#;
+        let parsed = parse_review_response(output).unwrap();
+        assert_eq!(parsed.summary, "Looks good overall.");
+        assert_eq!(parsed.issues.len(), 1);
+        assert_eq!(parsed.issues[0].file, "src/main.rs");
+        assert_eq!(parsed.issues[0].line, 42);
+        assert_eq!(parsed.issues[0].confidence, Some(9));
+    }
+
+    #[test]
+    fn test_parse_review_response_bare_braces() {
+        let output = r#"
+The analysis produced the following report:
+{
+  "summary": "Direct json.",
+  "issues": []
+}
+Hope this helps!
+"#;
+        let parsed = parse_review_response(output).unwrap();
+        assert_eq!(parsed.summary, "Direct json.");
+        assert!(parsed.issues.is_empty());
+    }
+
+    #[test]
+    fn test_parse_review_response_error_truncation() {
+        let huge_garbage = "A".repeat(1000);
+        let err = parse_review_response(&huge_garbage).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("Failed to parse LLM JSON:"));
+        assert!(err_msg.contains("truncated, total 1000 bytes"));
+        assert!(!err_msg.contains(&huge_garbage));
+    }
+
+    #[test]
+    fn test_parse_review_response_with_earlier_non_json_code_block() {
+        let output = r#"
+Here is some example code:
+```rust
+fn example() {
+    println!("hello");
+}
+```
+
+And here is the JSON review output:
+```json
+{
+  "summary": "Example works fine.",
+  "issues": []
+}
+```
+"#;
+        let parsed = parse_review_response(output).unwrap();
+        assert_eq!(parsed.summary, "Example works fine.");
+        assert!(parsed.issues.is_empty());
     }
 }

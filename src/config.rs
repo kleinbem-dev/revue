@@ -61,9 +61,15 @@ pub struct ForgeConfig {
     /// Base URL for the forge (e.g. https://git.kleinbem.dev)
     #[serde(default = "default_forge_url")]
     pub url: String,
-    /// Access token (overridden by FORGEJO_TOKEN / GITHUB_TOKEN if empty)
+    /// Generic fallback token (overridden by forgejo_token / github_token)
     #[serde(default)]
     pub token: Option<String>,
+    /// GitHub access token (overridden by GITHUB_TOKEN if empty)
+    #[serde(default)]
+    pub github_token: Option<String>,
+    /// Forgejo access token (overridden by FORGEJO_TOKEN if empty)
+    #[serde(default)]
+    pub forgejo_token: Option<String>,
     /// Webhook HMAC secret for signature verification (overridden by REVUE_WEBHOOK_SECRET)
     #[serde(default)]
     pub webhook_secret: Option<String>,
@@ -82,9 +88,9 @@ impl Default for ForgeConfig {
         Self {
             r#type: default_forge_type(),
             url: default_forge_url(),
-            token: std::env::var("FORGEJO_TOKEN")
-                .or_else(|_| std::env::var("GITHUB_TOKEN"))
-                .ok(),
+            token: None,
+            github_token: std::env::var("GITHUB_TOKEN").ok(),
+            forgejo_token: std::env::var("FORGEJO_TOKEN").ok(),
             webhook_secret: std::env::var("REVUE_WEBHOOK_SECRET").ok(),
         }
     }
@@ -267,10 +273,12 @@ impl RevueConfig {
         let mut cfg: RevueConfig = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse YAML from {:?}", path))?;
 
-        if cfg.forge.token.is_none() {
-            cfg.forge.token = std::env::var("FORGEJO_TOKEN")
-                .or_else(|_| std::env::var("GITHUB_TOKEN"))
-                .ok();
+        if cfg.forge.github_token.is_none() {
+            cfg.forge.github_token = std::env::var("GITHUB_TOKEN").ok();
+        }
+
+        if cfg.forge.forgejo_token.is_none() {
+            cfg.forge.forgejo_token = std::env::var("FORGEJO_TOKEN").ok();
         }
 
         if cfg.forge.webhook_secret.is_none() {
@@ -322,10 +330,14 @@ impl RevueConfig {
                 config.review.summary = summary;
             }
             if let Some(filters) = reviews.path_filters {
-                config.review.ignore = filters
-                    .into_iter()
-                    .map(|f| f.strip_prefix('!').unwrap_or(&f).to_string())
-                    .collect();
+                for filter in filters {
+                    if let Some(negated) = filter.strip_prefix('!') {
+                        let trimmed = negated.trim();
+                        if !trimmed.is_empty() && !config.review.ignore.iter().any(|i| i == trimmed) {
+                            config.review.ignore.push(trimmed.to_string());
+                        }
+                    }
+                }
             }
             if let Some(instructions) = reviews.path_instructions {
                 config.review.rules = instructions
@@ -447,8 +459,8 @@ tone_instructions: "Direct and crisp"
 reviews:
   high_level_summary: true
   path_filters:
-    - "!**/flake.lock"
-    - "!**/Cargo.lock"
+    - "!**/vendor/**"
+    - "src/**/*.rs"
   path_instructions:
     - path: "**/*.nix"
       instructions: "No plaintext secrets"
@@ -461,7 +473,10 @@ reviews:
         let _ = std::fs::remove_file(tmp_path);
         assert_eq!(config.review.language, "en-GB");
         assert_eq!(config.review.tone, "Direct and crisp");
-        assert_eq!(config.review.ignore, vec!["**/flake.lock", "**/Cargo.lock"]);
+        // Preserves default ignores and appends negated filter, ignoring positive include filter
+        assert!(config.review.ignore.contains(&"**/package-lock.json".to_string()));
+        assert!(config.review.ignore.contains(&"**/vendor/**".to_string()));
+        assert!(!config.review.ignore.contains(&"src/**/*.rs".to_string()));
         assert_eq!(config.review.rules.len(), 1);
         assert_eq!(config.review.rules[0].instructions, "No plaintext secrets");
     }

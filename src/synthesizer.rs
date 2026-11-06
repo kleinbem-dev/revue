@@ -191,10 +191,13 @@ pub fn extract_yaml_block(raw_llm_response: &str) -> Result<(String, String)> {
     Ok((rule_id, clean_yaml))
 }
 
+static VALIDATE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Validates Semgrep rule syntax using the local `semgrep validate` command line tool if installed.
 pub async fn validate_semgrep_rule(yaml_str: &str) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
-    let temp_file_name = format!("revue-rule-validate-{}.yaml", std::process::id());
+    let seq = VALIDATE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_file_name = format!("revue-rule-validate-{}-{}.yaml", std::process::id(), seq);
     let temp_path = temp_dir.join(temp_file_name);
 
     if let Err(e) = tokio::fs::write(&temp_path, yaml_str).await {
@@ -223,11 +226,10 @@ pub async fn validate_semgrep_rule(yaml_str: &str) -> Result<(), String> {
         }
         Ok(Err(e)) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                warn!(
-                    "Semgrep binary '{}' not found in PATH; skipping CLI validation step",
+                Err(format!(
+                    "Semgrep binary '{}' not found in PATH; cannot validate rule",
                     semgrep_bin
-                );
-                Ok(())
+                ))
             } else {
                 Err(format!("Failed to execute semgrep: {}", e))
             }
@@ -313,7 +315,8 @@ pub async fn append_learned_rule_to_repo(
     let final_content = format!("{}{}", file_header, serialized);
 
     // Write to a temporary file on the same filesystem, then atomically replace destination
-    let tmp_file = semgrep_dir.join(format!(".learned-rules-{}.tmp", std::process::id()));
+    let seq = VALIDATE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_file = semgrep_dir.join(format!(".learned-rules-{}-{}.tmp", std::process::id(), seq));
     tokio::fs::write(&tmp_file, &final_content)
         .await
         .context("Failed to write temporary learned-rules file")?;
