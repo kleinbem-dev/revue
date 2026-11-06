@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  options,
   ...
 }:
 
@@ -48,68 +49,112 @@ let
       default = null;
       description = "Path to an EnvironmentFile containing secrets (FORGEJO_TOKEN, GEMINI_API_KEY, GITHUB_TOKEN, REVUE_WEBHOOK_SECRET).";
     };
+
+    persistencePath = lib.mkOption {
+      type = lib.types.str;
+      default = "/nix/persist";
+      description = "Root path for impermanence persistent storage.";
+    };
   };
 in
 {
   options.services.revue = revueModuleOptions;
   options.services.nix-revue = revueModuleOptions;
 
-  config = lib.mkIf enabled {
-    systemd.tmpfiles.rules = lib.mkIf (cfg.user != null) [
-      "d /home/${cfg.user}/.local/share/revue 0750 ${cfg.user} ${if cfg.group != null then cfg.group else "users"} -"
-    ];
+  config = lib.mkIf enabled (
+    lib.mkMerge [
+      {
+        assertions = [
+          {
+            assertion = !(config.services.revue.enable && config.services.nix-revue.enable);
+            message = "Cannot enable both services.revue and services.nix-revue.";
+          }
+        ];
 
-    systemd.services.revue = {
-      description = "revue AI PR code review webhook daemon";
-      after = [ "network.target" ];
-      wantedBy = [ "multi-user.target" ];
+        systemd.tmpfiles.rules =
+          lib.optionals (cfg.user != null) [
+            "d /home/${cfg.user}/.local/share/revue 0750 ${cfg.user} ${if cfg.group != null then cfg.group else "users"} -"
+          ]
+          ++ lib.optionals (cfg.user == null && options.environment ? persistence) [
+            "d /var/lib/private 0700 root root -"
+            "d ${cfg.persistencePath}/var/lib/private 0700 root root -"
+          ];
 
-      path = [
-        pkgs.git
-        pkgs.jujutsu
-        pkgs.bash
-      ];
+        systemd.services.revue = {
+          description = "revue AI PR code review webhook daemon";
+          after = [ "network.target" ];
+          wantedBy = [ "multi-user.target" ];
 
-      serviceConfig =
-        {
-          ExecStart =
-            let
-              configArg = lib.optionalString (cfg.configFile != null) "--config ${cfg.configFile}";
-            in
-            "${lib.getExe cfg.package} ${configArg} daemon --listen ${cfg.listen}";
-          EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
-          Restart = "always";
-          RestartSec = "5s";
-        }
-        // (
-          if cfg.user != null then
+          # Jujutsu, Git, and Bash are required by revue for repo operations and ephemeral workspaces.
+          path = [
+            pkgs.git
+            pkgs.jujutsu
+            pkgs.bash
+          ]
+          ++ lib.optionals (cfg.user != null) [
+            "/etc/profiles/per-user/${cfg.user}"
+            "/run/current-system/sw"
+          ];
+
+          serviceConfig =
             {
-              User = cfg.user;
-              Group = if cfg.group != null then cfg.group else "users";
-              DynamicUser = false;
-              ProtectSystem = "strict";
-              ProtectHome = "read-only";
-              ReadWritePaths = [
-                "/home/${cfg.user}/.gemini"
-                "/home/${cfg.user}/.local/share/revue"
-              ];
-              NoNewPrivileges = true;
-              PrivateTmp = true;
-              Environment = [
-                "HOME=/home/${cfg.user}"
-                "REVUE_DATA_DIR=/home/${cfg.user}/.local/share/revue"
-                "PATH=/etc/profiles/per-user/${cfg.user}/bin:/run/current-system/sw/bin"
-              ];
+              ExecStart =
+                let
+                  configArg = lib.optionalString (cfg.configFile != null) "--config ${cfg.configFile}";
+                in
+                "${lib.getExe cfg.package} ${configArg} daemon --listen ${cfg.listen}";
+              EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
+              Restart = "always";
+              RestartSec = "5s";
             }
-          else
-            {
-              DynamicUser = true;
-              ProtectSystem = "strict";
-              ProtectHome = true;
-              NoNewPrivileges = true;
-              PrivateTmp = true;
-            }
-        );
-    };
-  };
+            // (
+              if cfg.user != null then
+                {
+                  User = cfg.user;
+                  Group = if cfg.group != null then cfg.group else "users";
+                  DynamicUser = false;
+                  ProtectSystem = "strict";
+                  ProtectHome = "read-only";
+                  ReadWritePaths = [
+                    "/home/${cfg.user}/.gemini"
+                    "/home/${cfg.user}/.local/share/revue"
+                  ];
+                  NoNewPrivileges = true;
+                  PrivateTmp = true;
+                  Environment = [
+                    "HOME=/home/${cfg.user}"
+                    "REVUE_DATA_DIR=/home/${cfg.user}/.local/share/revue"
+                  ];
+                }
+              else
+                {
+                  DynamicUser = true;
+                  StateDirectory = "revue";
+                  ProtectSystem = "strict";
+                  ProtectHome = true;
+                  NoNewPrivileges = true;
+                  PrivateTmp = true;
+                  Environment = [
+                    "REVUE_DATA_DIR=/var/lib/revue"
+                  ];
+                }
+            );
+        };
+      }
+      # /var is tmpfs on the fleet; persist the state directory across reboots.
+      # optionalAttrs avoids error on hosts without the impermanence module.
+      (lib.optionalAttrs (options.environment ? persistence) {
+        environment.persistence."${cfg.persistencePath}" = {
+          directories = lib.optionals (cfg.user == null) [
+            "/var/lib/private/revue"
+          ];
+          users = lib.optionalAttrs (cfg.user != null) {
+            "${cfg.user}".directories = [
+              ".local/share/revue"
+            ];
+          };
+        };
+      })
+    ]
+  );
 }
