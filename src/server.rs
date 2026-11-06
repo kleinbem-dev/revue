@@ -735,23 +735,22 @@ async fn trigger_review(
                         repo_clone, pr, e
                     );
                     if let Some(db) = &state_clone.db {
-                        let _ = db
-                            .record_review(
-                                &repo_clone,
-                                pr as i64,
-                                &format!("PR #{}: Review failed", pr),
-                                "unknown",
-                                "failed",
-                                "error",
-                                0,
-                                0,
-                                0,
-                                0.0,
-                                duration_ms as i64,
-                                &format!("Review pipeline failed: {}", e),
-                                "[]",
-                            )
-                            .await;
+                        let rec = crate::db::NewReviewRecord {
+                            repo: &repo_clone,
+                            pr_number: pr as i64,
+                            title: &format!("PR #{}: Review failed", pr),
+                            author: "unknown",
+                            status: "failed",
+                            provider_used: "error",
+                            pass1: 0,
+                            pass2: 0,
+                            verified: 0,
+                            cost_saved: 0.0,
+                            duration_ms: duration_ms as i64,
+                            summary: &format!("Review pipeline failed: {}", e),
+                            findings_json: "[]",
+                        };
+                        let _ = db.record_review(&rec).await;
                     }
                 }
             }
@@ -926,23 +925,22 @@ async fn handle_webhook(
                 repo_for_review, pr_num, e
             );
             if let Some(db) = db_opt {
-                let _ = db
-                    .record_review(
-                        &repo_for_review,
-                        pr_num as i64,
-                        &format!("PR #{}: Webhook review failed", pr_num),
-                        "unknown",
-                        "failed",
-                        "error",
-                        0,
-                        0,
-                        0,
-                        0.0,
-                        duration_ms as i64,
-                        &format!("Webhook review execution failed: {}", e),
-                        "[]",
-                    )
-                    .await;
+                let rec = crate::db::NewReviewRecord {
+                    repo: &repo_for_review,
+                    pr_number: pr_num as i64,
+                    title: &format!("PR #{}: Webhook review failed", pr_num),
+                    author: "unknown",
+                    status: "failed",
+                    provider_used: "error",
+                    pass1: 0,
+                    pass2: 0,
+                    verified: 0,
+                    cost_saved: 0.0,
+                    duration_ms: duration_ms as i64,
+                    summary: &format!("Webhook review execution failed: {}", e),
+                    findings_json: "[]",
+                };
+                let _ = db.record_review(&rec).await;
             }
         }
     });

@@ -59,7 +59,7 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
                 providers.push(Box::new(AntigravityCliProvider::new()));
             }
             "mesh-llm" | "mesh" => {
-                providers.push(Box::new(MeshLlmProvider::new(
+                providers.push(Box::new(MeshLlmProvider::create(
                     config.providers.mesh_llm_url.clone(),
                     config.providers.mesh_llm_model.clone(),
                 )));
@@ -75,7 +75,7 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
                 }
             }
             "ollama" => {
-                providers.push(Box::new(OllamaProvider::new(
+                providers.push(Box::new(OllamaProvider::create(
                     config.providers.ollama_url.clone(),
                     config.providers.ollama_model.clone(),
                 )));
@@ -763,6 +763,7 @@ fn filter_issues(issues: &mut Vec<ReviewIssue>, config: &RevueConfig) {
 }
 
 /// Executes the multi-pass review pipeline against the given parsed diff.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_review_pipeline(
     diff: &ParsedDiff,
     config: &RevueConfig,
@@ -1130,24 +1131,22 @@ pub async fn run_pr_review(
     // Persist real review to database if available
     if let Some(pool) = db {
         let findings_json = serde_json::to_string(&res.issues).unwrap_or_else(|_| "[]".to_string());
-        if let Err(e) = pool
-            .record_review(
-                repo,
-                index as i64,
-                &metadata.title,
-                &metadata.author,
-                "completed",
-                &res.provider_used,
-                res.pass1_candidates as i64,
-                res.pass1_candidates.saturating_sub(res.pass2_verified) as i64,
-                res.pass2_verified as i64,
-                0.0,
-                res.duration_ms as i64,
-                &res.summary,
-                &findings_json,
-            )
-            .await
-        {
+        let rec = crate::db::NewReviewRecord {
+            repo,
+            pr_number: index as i64,
+            title: &metadata.title,
+            author: &metadata.author,
+            status: "completed",
+            provider_used: &res.provider_used,
+            pass1: res.pass1_candidates as i64,
+            pass2: res.pass1_candidates.saturating_sub(res.pass2_verified) as i64,
+            verified: res.pass2_verified as i64,
+            cost_saved: 0.0,
+            duration_ms: res.duration_ms as i64,
+            summary: &res.summary,
+            findings_json: &findings_json,
+        };
+        if let Err(e) = pool.record_review(&rec).await {
             tracing::warn!("Failed to persist review for {} #{}: {}", repo, index, e);
         }
     }

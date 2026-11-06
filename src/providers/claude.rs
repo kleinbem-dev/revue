@@ -14,6 +14,12 @@ impl ClaudeCliProvider {
     }
 }
 
+impl Default for ClaudeCliProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Provider for ClaudeCliProvider {
     fn name(&self) -> &str {

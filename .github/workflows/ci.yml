@@ -32,5 +32,12 @@ jobs:
         run: nix build .#web
       - name: Check unused dependencies
         run: nix shell nixpkgs#cargo-machete --command cargo-machete
+      - name: Clippy
+        run: nix develop --command cargo clippy --all-targets -- -D warnings
+      - name: Svelte check
+        run: |
+          cd web
+          nix develop .. --command npm ci
+          nix develop .. --command npm run check
       - name: Unit tests
         run: nix develop --command cargo test --all-targets

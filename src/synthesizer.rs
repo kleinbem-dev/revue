@@ -72,7 +72,7 @@ pub fn detect_language_from_path(path: &str) -> &'static str {
         "rb" => "ruby",
         "php" => "php",
         // Nix files and general configs default to generic spacegrep pattern matching
-        "nix" | _ => "generic",
+        _ => "generic",
     }
 }
 
