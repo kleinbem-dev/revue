@@ -1,0 +1,12 @@
+{
+  "id": "eval-04-unbounded-concurrency-dos",
+  "name": "Unbounded Task Spawning Concurrency Risk",
+  "description": "Spawning async tasks in a loop without bounding or concurrency control",
+  "diff": "diff --git a/src/worker.rs b/src/worker.rs\n--- a/src/worker.rs\n+++ b/src/worker.rs\n@@ -40,3 +40,5 @@\n+    for item in work_queue {\n+        tokio::spawn(async move {\n+            process_large_payload(item).await;\n+        });\n+    }\n",
+  "expected_type": "true_positive",
+  "expected_category": "concurrency",
+  "expected_min_severity": "error",
+  "expected_file": "src/worker.rs",
+  "detective_response": "- In `src/worker.rs`: Spawning unbounded tasks in a loop without a semaphore or rate limiting can exhaust file descriptors and memory under high burst loads.",
+  "judge_response": "```json\n{\n  \"summary\": \"Unbounded concurrent task spawning in worker loop\",\n  \"issues\": [\n    {\n      \"file\": \"src/worker.rs\",\n      \"line\": 42,\n      \"severity\": \"error\",\n      \"title\": \"Unbounded Task Spawning Concurrency Risk\",\n      \"comment\": \"Iterating over `work_queue` and calling `tokio::spawn` without a concurrency limit or `tokio::sync::Semaphore` can cause out-of-memory or descriptor exhaustion under burst loads.\",\n      \"confidence\": 9\n    }\n  ]\n}\n```"
+}
