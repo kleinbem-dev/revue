@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import FontSizeToggle from '@kleinbem/web-config/font-size/toggle';
+	import ThemeToggle from '@kleinbem/web-config/theme/toggle';
 
 	let {
 		version = '0.1.0'
@@ -76,10 +78,21 @@
 			<span class="dot"></span>
 			Forgejo
 		</a>
+
+		<div class="toggle-group">
+			<FontSizeToggle />
+			<ThemeToggle />
+		</div>
 	</div>
 </header>
 
 <style>
+	.toggle-group {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		margin-left: 0.25rem;
+	}
 	.header {
 		display: flex;
 		align-items: center;

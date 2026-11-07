@@ -3,7 +3,23 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="text-scale" content="scale" />
+		<meta name="color-scheme" content="dark light" />
+		<script>
+			try {
+				const p = localStorage.getItem('fleet-theme');
+				const m = window.matchMedia('(prefers-color-scheme: dark)').matches;
+				const t = (!p || p === 'system') ? (m ? 'dark' : 'light') : p;
+				document.documentElement.dataset.theme = t;
+				document.documentElement.classList.toggle('dark', t === 'dark');
+				document.documentElement.classList.toggle('light', t === 'light');
+
+				const s = localStorage.getItem('fleet-font-size');
+				if (s && s !== 'normal') {
+					document.documentElement.dataset.fontSize = s;
+					document.documentElement.classList.add('font-size-' + s);
+				}
+			} catch (e) {}
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">
