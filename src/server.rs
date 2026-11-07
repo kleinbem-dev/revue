@@ -2,21 +2,21 @@ use crate::config::RevueConfig;
 use crate::reviewer::run_pr_review;
 use anyhow::Result;
 use axum::{
+    Router,
     body::Bytes,
     extract::{ConnectInfo, Request, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
-    Router,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
@@ -408,41 +408,41 @@ async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse
     records.extend(running_records.iter().cloned());
 
     // 2. Persistent reviews from DB
-    if let Some(db) = &state.db {
-        if let Ok(db_reviews) = db.list_recent_reviews(50).await {
-            for r in db_reviews {
-                // Skip DB record only if the same PR is actively running in-memory
-                if running_records
-                    .iter()
-                    .any(|rec| rec.repo == r.repo && rec.pr_number == r.pr_number as u64)
-                {
-                    continue;
-                }
-                let findings: Vec<Finding> =
-                    serde_json::from_str(&r.findings_json).unwrap_or_else(|err| {
-                        warn!("Failed to parse findings for review {}: {}", r.id, err);
-                        Vec::new()
-                    });
-                records.push(ReviewRecord {
-                    id: r.id.to_string(),
-                    repo: r.repo.clone(),
-                    pr_number: r.pr_number as u64,
-                    title: Some(r.title),
-                    status: r.status,
-                    pass1_candidates: r.pass1_candidates as u32,
-                    pass2_verified: r.verified_findings as u32,
-                    duration_secs: (r.duration_ms / 1000) as u64,
-                    provider_used: r.provider_used,
-                    created_at: r.created_at,
-                    summary: r.summary,
-                    forge: if r.repo.contains("git.") {
-                        "forgejo".to_string()
-                    } else {
-                        "github".to_string()
-                    },
-                    findings,
-                });
+    if let Some(db) = &state.db
+        && let Ok(db_reviews) = db.list_recent_reviews(50).await
+    {
+        for r in db_reviews {
+            // Skip DB record only if the same PR is actively running in-memory
+            if running_records
+                .iter()
+                .any(|rec| rec.repo == r.repo && rec.pr_number == r.pr_number as u64)
+            {
+                continue;
             }
+            let findings: Vec<Finding> =
+                serde_json::from_str(&r.findings_json).unwrap_or_else(|err| {
+                    warn!("Failed to parse findings for review {}: {}", r.id, err);
+                    Vec::new()
+                });
+            records.push(ReviewRecord {
+                id: r.id.to_string(),
+                repo: r.repo.clone(),
+                pr_number: r.pr_number as u64,
+                title: Some(r.title),
+                status: r.status,
+                pass1_candidates: r.pass1_candidates as u32,
+                pass2_verified: r.verified_findings as u32,
+                duration_secs: (r.duration_ms / 1000) as u64,
+                provider_used: r.provider_used,
+                created_at: r.created_at,
+                summary: r.summary,
+                forge: if r.repo.contains("git.") {
+                    "forgejo".to_string()
+                } else {
+                    "github".to_string()
+                },
+                findings,
+            });
         }
     }
 
@@ -472,8 +472,8 @@ async fn record_finding_feedback(
     );
 
     // 1. Record into persistent DB if available
-    if let Some(db) = &state.db {
-        if let Err(e) = db
+    if let Some(db) = &state.db
+        && let Err(e) = db
             .record_feedback(
                 &req.repo,
                 &req.file_path,
@@ -482,17 +482,16 @@ async fn record_finding_feedback(
                 req.reason.as_deref(),
             )
             .await
-        {
-            error!("Failed to record feedback to db: {:?}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Database error: {}", e)
-                })),
-            )
-                .into_response();
-        }
+    {
+        error!("Failed to record feedback to db: {:?}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Database error: {}", e)
+            })),
+        )
+            .into_response();
     }
 
     // 2. Update in-memory reviews state
@@ -1028,7 +1027,11 @@ pub async fn run_daemon(
                 .and_then(|c| c.forge.webhook_secret.clone())
                 .filter(|s| non_blank(s))
         })
-        .or_else(|| std::env::var("REVUE_WEBHOOK_SECRET").ok().filter(|s| non_blank(s)));
+        .or_else(|| {
+            std::env::var("REVUE_WEBHOOK_SECRET")
+                .ok()
+                .filter(|s| non_blank(s))
+        });
 
     let resolved_insecure = insecure_webhooks
         || loaded_cfg
@@ -1103,10 +1106,10 @@ pub async fn run_daemon(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ] {
-        if let Ok(val) = origin.parse::<HeaderValue>() {
-            if !allowed_origins.contains(&val) {
-                allowed_origins.push(val);
-            }
+        if let Ok(val) = origin.parse::<HeaderValue>()
+            && !allowed_origins.contains(&val)
+        {
+            allowed_origins.push(val);
         }
     }
 

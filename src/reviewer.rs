@@ -1,13 +1,13 @@
 use crate::config::RevueConfig;
 use crate::diff::ParsedDiff;
 use crate::forges::{
-    forgejo::ForgejoClient, github::GitHubClient, Forge, InlineReviewComment, PrMetadata,
+    Forge, InlineReviewComment, PrMetadata, forgejo::ForgejoClient, github::GitHubClient,
 };
 use crate::providers::{
-    antigravity::AntigravityCliProvider, claude::ClaudeCliProvider, gemini::GeminiProvider,
-    mesh_llm::MeshLlmProvider, ollama::OllamaProvider, Provider, ProviderChain,
+    Provider, ProviderChain, antigravity::AntigravityCliProvider, claude::ClaudeCliProvider,
+    gemini::GeminiProvider, mesh_llm::MeshLlmProvider, ollama::OllamaProvider,
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::time::Duration;
@@ -298,7 +298,7 @@ pub async fn run_semgrep_pass0(
 
     // When scanning an untrusted PR checkout distinct from the trusted rules checkout,
     // ensure resolved config does not reside within the scan root.
-    if let (Some(scan), Some(ref cfg_str)) = (scan_root, &config_arg) {
+    if let (Some(scan), Some(cfg_str)) = (scan_root, &config_arg) {
         let is_distinct_checkout = match trusted_rules_root {
             Some(trusted) => match (scan.canonicalize(), trusted.canonicalize()) {
                 (Ok(s), Ok(t)) => s != t,
@@ -306,18 +306,16 @@ pub async fn run_semgrep_pass0(
             },
             None => true,
         };
-        if is_distinct_checkout {
-            if let Ok(scan_canon) = scan.canonicalize() {
-                let cfg_path = std::path::Path::new(cfg_str);
-                if let Ok(cfg_canon) = cfg_path.canonicalize() {
-                    if cfg_canon.starts_with(&scan_canon) {
-                        tracing::warn!(
-                            "Rejecting Semgrep config resolving inside PR checkout: {:?}",
-                            cfg_canon
-                        );
-                        return Vec::new();
-                    }
-                }
+        if is_distinct_checkout && let Ok(scan_canon) = scan.canonicalize() {
+            let cfg_path = std::path::Path::new(cfg_str);
+            if let Ok(cfg_canon) = cfg_path.canonicalize()
+                && cfg_canon.starts_with(&scan_canon)
+            {
+                tracing::warn!(
+                    "Rejecting Semgrep config resolving inside PR checkout: {:?}",
+                    cfg_canon
+                );
+                return Vec::new();
             }
         }
     }
@@ -505,18 +503,21 @@ pub fn load_repo_guidelines(
 
     for file in candidate_files {
         let path = dir.join(file);
-        if path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    let (scrubbed, _) = crate::scrubber::scrub_diff(trimmed);
-                    let capped = if let Some((end, _)) = scrubbed.char_indices().nth(3000) {
-                        format!("{}\n... (truncated repository guidelines)", &scrubbed[..end])
-                    } else {
-                        scrubbed
-                    };
-                    return Some(capped);
-                }
+        if path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                let (scrubbed, _) = crate::scrubber::scrub_diff(trimmed);
+                let capped = if let Some((end, _)) = scrubbed.char_indices().nth(3000) {
+                    format!(
+                        "{}\n... (truncated repository guidelines)",
+                        &scrubbed[..end]
+                    )
+                } else {
+                    scrubbed
+                };
+                return Some(capped);
             }
         }
     }
@@ -981,10 +982,10 @@ fn extract_json_payload(raw: &str) -> &str {
     }
 
     // 2. Fall back to finding the outermost '{' and '}'
-    if let (Some(first_brace), Some(last_brace)) = (trimmed.find('{'), trimmed.rfind('}')) {
-        if first_brace < last_brace {
-            return trimmed[first_brace..=last_brace].trim();
-        }
+    if let (Some(first_brace), Some(last_brace)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && first_brace < last_brace
+    {
+        return trimmed[first_brace..=last_brace].trim();
     }
 
     trimmed
@@ -1025,12 +1026,12 @@ pub fn parse_review_response(raw: &str) -> Result<ReviewOutput> {
 /// Fetches uncommitted local git or Jujutsu diff against base.
 fn fetch_local_diff(base: &str) -> Result<String> {
     // 1. Try `git diff <base>`
-    if let Ok(output) = Command::new("git").args(["diff", base]).output() {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout).to_string();
-            if !s.trim().is_empty() {
-                return Ok(s);
-            }
+    if let Ok(output) = Command::new("git").args(["diff", base]).output()
+        && output.status.success()
+    {
+        let s = String::from_utf8_lossy(&output.stdout).to_string();
+        if !s.trim().is_empty() {
+            return Ok(s);
         }
     }
 
@@ -1039,12 +1040,11 @@ fn fetch_local_diff(base: &str) -> Result<String> {
     if let Ok(output) = Command::new("jj")
         .args(["diff", "--git", "-r", &jj_range])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout).to_string();
-            if !s.trim().is_empty() {
-                return Ok(s);
-            }
+        let s = String::from_utf8_lossy(&output.stdout).to_string();
+        if !s.trim().is_empty() {
+            return Ok(s);
         }
     }
 
@@ -1206,15 +1206,17 @@ pub async fn run_pr_review(
 
     info!("Fetching PR #{} diff for {}", index, repo);
     let raw_diff = forge.fetch_pr_diff(repo, index).await?;
-    if !metadata.head_sha.is_empty() {
-        if let Ok(after) = forge.fetch_pr_metadata(repo, index).await {
-            if !after.head_sha.is_empty() && after.head_sha != metadata.head_sha {
-                return Err(anyhow::anyhow!(
-                    "PR #{} head moved from {} to {} during fetch; rerun the review",
-                    index, metadata.head_sha, after.head_sha
-                ));
-            }
-        }
+    if !metadata.head_sha.is_empty()
+        && let Ok(after) = forge.fetch_pr_metadata(repo, index).await
+        && !after.head_sha.is_empty()
+        && after.head_sha != metadata.head_sha
+    {
+        return Err(anyhow::anyhow!(
+            "PR #{} head moved from {} to {} during fetch; rerun the review",
+            index,
+            metadata.head_sha,
+            after.head_sha
+        ));
     }
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
     parsed.apply_filters(&config.review.ignore);

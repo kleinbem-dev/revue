@@ -102,11 +102,11 @@ impl ParsedDiff {
             for pattern in filters {
                 let clean_pattern = pattern.strip_prefix('!').unwrap_or(pattern);
                 let glob_pattern = clean_glob(clean_pattern);
-                if let Ok(matcher) = glob::Pattern::new(&glob_pattern) {
-                    if matcher.matches(&f.new_path) {
-                        tracing::debug!("Ignoring filtered file: {}", f.new_path);
-                        return false;
-                    }
+                if let Ok(matcher) = glob::Pattern::new(&glob_pattern)
+                    && matcher.matches(&f.new_path)
+                {
+                    tracing::debug!("Ignoring filtered file: {}", f.new_path);
+                    return false;
                 }
             }
             true
@@ -134,38 +134,38 @@ impl ParsedDiff {
                 }
             }
 
-            if file_path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&file_path) {
-                    let lines: Vec<&str> = content.lines().collect();
-                    if lines.len() <= 500 {
-                        let mut numbered = String::new();
-                        for (idx, line) in lines.iter().enumerate() {
-                            numbered.push_str(&format!("{:4} | {}\n", idx + 1, line));
-                        }
-                        f.file_context = Some(numbered);
-                    } else {
-                        let mut included_lines = std::collections::BTreeSet::new();
-                        for h in &f.hunks {
-                            let start = h.new_start.saturating_sub(40).max(1);
-                            let end = (h.new_start + h.new_lines + 40).min(lines.len() as u64);
-                            for l in start..=end {
-                                included_lines.insert(l);
-                            }
-                        }
-
-                        let mut excerpt = String::new();
-                        let mut last_line = 0;
-                        for line_num in included_lines {
-                            if last_line != 0 && line_num > last_line + 1 {
-                                excerpt.push_str("     ...\n");
-                            }
-                            if let Some(line) = lines.get((line_num - 1) as usize) {
-                                excerpt.push_str(&format!("{:4} | {}\n", line_num, line));
-                            }
-                            last_line = line_num;
-                        }
-                        f.file_context = Some(excerpt);
+            if file_path.is_file()
+                && let Ok(content) = std::fs::read_to_string(&file_path)
+            {
+                let lines: Vec<&str> = content.lines().collect();
+                if lines.len() <= 500 {
+                    let mut numbered = String::new();
+                    for (idx, line) in lines.iter().enumerate() {
+                        numbered.push_str(&format!("{:4} | {}\n", idx + 1, line));
                     }
+                    f.file_context = Some(numbered);
+                } else {
+                    let mut included_lines = std::collections::BTreeSet::new();
+                    for h in &f.hunks {
+                        let start = h.new_start.saturating_sub(40).max(1);
+                        let end = (h.new_start + h.new_lines + 40).min(lines.len() as u64);
+                        for l in start..=end {
+                            included_lines.insert(l);
+                        }
+                    }
+
+                    let mut excerpt = String::new();
+                    let mut last_line = 0;
+                    for line_num in included_lines {
+                        if last_line != 0 && line_num > last_line + 1 {
+                            excerpt.push_str("     ...\n");
+                        }
+                        if let Some(line) = lines.get((line_num - 1) as usize) {
+                            excerpt.push_str(&format!("{:4} | {}\n", line_num, line));
+                        }
+                        last_line = line_num;
+                    }
+                    f.file_context = Some(excerpt);
                 }
             }
         }
@@ -229,9 +229,12 @@ impl ParsedDiff {
         }
 
         // Emit concise summary for omitted generated lockfiles
-        for gen in generated_files {
+        for generated in generated_files {
             stats.omitted_generated_files += 1;
-            let note = format!("=== FILE OMITTED (LOCKFILE / GENERATED): {} ===\n\n", effective_path(gen));
+            let note = format!(
+                "=== FILE OMITTED (LOCKFILE / GENERATED): {} ===\n\n",
+                effective_path(generated)
+            );
             total_chars += note.len();
             out.push_str(&note);
         }
