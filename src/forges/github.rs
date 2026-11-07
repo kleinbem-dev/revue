@@ -1,7 +1,7 @@
 use super::{DiscussionComment, Forge, InlineReviewComment, PrMetadata};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Serialize;
 use tracing::info;
 
@@ -155,36 +155,31 @@ impl Forge for GitHubClient {
             "https://api.github.com/repos/{}/pulls/{}/comments?per_page=100",
             repo, pr_index
         );
-        if let Ok(res) = self.client.get(&pulls_url).send().await {
-            if res.status().is_success() {
-                if let Ok(val) = res.json::<serde_json::Value>().await {
-                    if let Some(arr) = val.as_array() {
-                        for item in arr {
-                            if let Some(body) = item.get("body").and_then(|b| b.as_str()) {
-                                let author = item
-                                    .get("user")
-                                    .and_then(|u| u.get("login"))
-                                    .and_then(|l| l.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                let path = item
-                                    .get("path")
-                                    .and_then(|p| p.as_str())
-                                    .map(String::from);
-                                let line = item
-                                    .get("line")
-                                    .or_else(|| item.get("original_line"))
-                                    .and_then(|l| l.as_u64());
+        if let Ok(res) = self.client.get(&pulls_url).send().await
+            && res.status().is_success()
+            && let Ok(val) = res.json::<serde_json::Value>().await
+            && let Some(arr) = val.as_array()
+        {
+            for item in arr {
+                if let Some(body) = item.get("body").and_then(|b| b.as_str()) {
+                    let author = item
+                        .get("user")
+                        .and_then(|u| u.get("login"))
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let path = item.get("path").and_then(|p| p.as_str()).map(String::from);
+                    let line = item
+                        .get("line")
+                        .or_else(|| item.get("original_line"))
+                        .and_then(|l| l.as_u64());
 
-                                comments.push(DiscussionComment {
-                                    author,
-                                    path,
-                                    line,
-                                    body: body.to_string(),
-                                });
-                            }
-                        }
-                    }
+                    comments.push(DiscussionComment {
+                        author,
+                        path,
+                        line,
+                        body: body.to_string(),
+                    });
                 }
             }
         }
@@ -194,28 +189,26 @@ impl Forge for GitHubClient {
             "https://api.github.com/repos/{}/issues/{}/comments?per_page=100",
             repo, pr_index
         );
-        if let Ok(res) = self.client.get(&issues_url).send().await {
-            if res.status().is_success() {
-                if let Ok(val) = res.json::<serde_json::Value>().await {
-                    if let Some(arr) = val.as_array() {
-                        for item in arr {
-                            if let Some(body) = item.get("body").and_then(|b| b.as_str()) {
-                                let author = item
-                                    .get("user")
-                                    .and_then(|u| u.get("login"))
-                                    .and_then(|l| l.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
+        if let Ok(res) = self.client.get(&issues_url).send().await
+            && res.status().is_success()
+            && let Ok(val) = res.json::<serde_json::Value>().await
+            && let Some(arr) = val.as_array()
+        {
+            for item in arr {
+                if let Some(body) = item.get("body").and_then(|b| b.as_str()) {
+                    let author = item
+                        .get("user")
+                        .and_then(|u| u.get("login"))
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
 
-                                comments.push(DiscussionComment {
-                                    author,
-                                    path: None,
-                                    line: None,
-                                    body: body.to_string(),
-                                });
-                            }
-                        }
-                    }
+                    comments.push(DiscussionComment {
+                        author,
+                        path: None,
+                        line: None,
+                        body: body.to_string(),
+                    });
                 }
             }
         }

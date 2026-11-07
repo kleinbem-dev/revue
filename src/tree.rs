@@ -27,12 +27,11 @@ pub fn resolve_repo_root(repo_arg: &str) -> Option<PathBuf> {
 
     // 1. Current working directory
     let cwd = PathBuf::from(".");
-    if cwd.join(".git").exists() || cwd.join(".jj").exists() {
-        if let Ok(canon) = cwd.canonicalize() {
-            if canon.file_name().and_then(|n| n.to_str()) == Some(repo_basename) {
-                return Some(canon);
-            }
-        }
+    if (cwd.join(".git").exists() || cwd.join(".jj").exists())
+        && let Ok(canon) = cwd.canonicalize()
+        && canon.file_name().and_then(|n| n.to_str()) == Some(repo_basename)
+    {
+        return Some(canon);
     }
 
     // 2. Explicit workspace root from env

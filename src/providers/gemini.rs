@@ -1,5 +1,5 @@
 use super::Provider;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -66,15 +66,15 @@ impl GeminiProvider {
 
 fn resolve_gemini_key() -> Option<String> {
     // 1. Env vars
-    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
-        if !key.trim().is_empty() {
-            return Some(key.trim().to_string());
-        }
+    if let Ok(key) = std::env::var("GEMINI_API_KEY")
+        && !key.trim().is_empty()
+    {
+        return Some(key.trim().to_string());
     }
-    if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
-        if !key.trim().is_empty() {
-            return Some(key.trim().to_string());
-        }
+    if let Ok(key) = std::env::var("GOOGLE_API_KEY")
+        && !key.trim().is_empty()
+    {
+        return Some(key.trim().to_string());
     }
 
     // 2. File fallback: ~/.config/gemini/api_key or ~/.config/google/api_key

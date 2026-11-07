@@ -191,13 +191,12 @@ pub fn find_matching_skills(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(skill) = load_skill_from_dir(&path) {
-                if is_skill_triggered(&skill, changed_files) {
-                    debug!("Activating fleet skill: {}", skill.name);
-                    matched.push(skill);
-                }
-            }
+        if path.is_dir()
+            && let Some(skill) = load_skill_from_dir(&path)
+            && is_skill_triggered(&skill, changed_files)
+        {
+            debug!("Activating fleet skill: {}", skill.name);
+            matched.push(skill);
         }
     }
 
@@ -220,14 +219,14 @@ pub fn list_all_skills(skills_dir: Option<&Path>) -> Vec<SkillSummary> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(skill) = load_skill_from_dir(&path) {
-                skills.push(SkillSummary {
-                    name: skill.name,
-                    description: skill.description,
-                    triggers: skill.triggers,
-                });
-            }
+        if path.is_dir()
+            && let Some(skill) = load_skill_from_dir(&path)
+        {
+            skills.push(SkillSummary {
+                name: skill.name,
+                description: skill.description,
+                triggers: skill.triggers,
+            });
         }
     }
 

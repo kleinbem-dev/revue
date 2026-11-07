@@ -1,7 +1,8 @@
 [package]
 name = "revue"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.94"
 authors = ["Martin <martin@kleinbem.dev>"]
 description = "Self-hosted, forge-agnostic AI code review engine with multi-provider cascade (Gemini, Claude, Ollama)"
 license = "MIT"
