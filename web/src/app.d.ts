@@ -8,7 +8,10 @@ declare global {
 		}
 		// interface Locals {}
 		// interface PageData {}
-		// interface PageState {}
+		interface PageState {
+			selectedReviewId?: string;
+			isTriggerOpen?: boolean;
+		}
 		// interface Platform {}
 	}
 }

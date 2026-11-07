@@ -1,13 +1,13 @@
 <script lang="ts">
+	import { page } from '$app/state';
+
 	let {
-		version = '0.1.0',
-		activeTab = 'dashboard',
-		onTabChange
+		version = '0.1.0'
 	}: {
 		version?: string;
-		activeTab?: 'dashboard' | 'wizard' | 'brain';
-		onTabChange?: (tab: 'dashboard' | 'wizard' | 'brain') => void;
 	} = $props();
+
+	const currentPath = $derived(page.url.pathname);
 </script>
 
 <header class="header">
@@ -22,32 +22,35 @@
 
 	<!-- Navigation Tabs -->
 	<nav class="nav-tabs">
-		<button
+		<a
+			href="/"
 			class="nav-tab"
-			class:active={activeTab === 'dashboard'}
-			onclick={() => onTabChange?.('dashboard')}
+			class:active={currentPath === '/'}
+			data-sveltekit-preload-data="hover"
 		>
 			<span class="tab-icon">📊</span>
 			<span>Triage & Reviews</span>
-		</button>
+		</a>
 
-		<button
+		<a
+			href="/wizard"
 			class="nav-tab"
-			class:active={activeTab === 'wizard'}
-			onclick={() => onTabChange?.('wizard')}
+			class:active={currentPath.startsWith('/wizard')}
+			data-sveltekit-preload-data="hover"
 		>
 			<span class="tab-icon">🥕</span>
 			<span>Rules & Config Wizard</span>
-		</button>
+		</a>
 
-		<button
+		<a
+			href="/brain"
 			class="nav-tab"
-			class:active={activeTab === 'brain'}
-			onclick={() => onTabChange?.('brain')}
+			class:active={currentPath.startsWith('/brain')}
+			data-sveltekit-preload-data="hover"
 		>
 			<span class="tab-icon">🧠</span>
 			<span>Brain & Skills</span>
-		</button>
+		</a>
 	</nav>
 
 	<div class="header-actions">
@@ -159,6 +162,7 @@
 		background: transparent;
 		border: none;
 		cursor: pointer;
+		text-decoration: none;
 		transition: all 0.15s ease;
 	}
 
