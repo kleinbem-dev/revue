@@ -446,22 +446,26 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
                 s.push_str(&format!("- Target Repository: `{}`\n", meta.repo));
             }
         }
-        if !meta.base_ref.is_empty() || !meta.head_ref.is_empty() {
-            let base = if meta.base_ref.is_empty() {
-                "main"
-            } else {
-                &meta.base_ref
-            };
-            let head = if meta.head_ref.is_empty() {
-                if meta.head_sha.is_empty() {
-                    "HEAD"
-                } else {
+        match (!meta.head_ref.is_empty(), !meta.base_ref.is_empty()) {
+            (true, true) => {
+                s.push_str(&format!(
+                    "- Branches: `{}` → `{}`\n",
+                    meta.head_ref, meta.base_ref
+                ));
+            }
+            (true, false) => {
+                s.push_str(&format!("- Source Branch: `{}`\n", meta.head_ref));
+            }
+            (false, true) => {
+                s.push_str(&format!("- Base Branch: `{}`\n", meta.base_ref));
+            }
+            (false, false) if !meta.head_sha.is_empty() => {
+                s.push_str(&format!(
+                    "- Target Head: `{}`\n",
                     &meta.head_sha[..meta.head_sha.len().min(8)]
-                }
-            } else {
-                &meta.head_ref
-            };
-            s.push_str(&format!("- Branches: `{}` → `{}`\n", head, base));
+                ));
+            }
+            (false, false) => {}
         }
         if meta.is_draft {
             s.push_str("- Status: Draft (work in progress)\n");
@@ -489,30 +493,29 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
 pub fn load_repo_guidelines(
     repo_path: Option<&std::path::Path>,
     trusted_rules_root: Option<&std::path::Path>,
+    is_pr_review: bool,
 ) -> Option<String> {
-    let candidate_dirs = [trusted_rules_root, repo_path];
+    // PR reviews must strictly use trusted rules root from verified host checkout to prevent prompt injection
+    let dir = if is_pr_review {
+        trusted_rules_root?
+    } else {
+        trusted_rules_root.or(repo_path)?
+    };
     let candidate_files = ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"];
 
-    for dir in candidate_dirs.into_iter().flatten() {
-        for file in candidate_files {
-            let path = dir.join(file);
-            if path.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let trimmed = content.trim();
-                    if !trimmed.is_empty() {
-                        let (scrubbed, _) = crate::scrubber::scrub_diff(trimmed);
-                        let capped = if scrubbed.len() > 3000 {
-                            let end = scrubbed
-                                .char_indices()
-                                .nth(3000)
-                                .map(|(i, _)| i)
-                                .unwrap_or(3000);
-                            format!("{}\n... (truncated repository guidelines)", &scrubbed[..end])
-                        } else {
-                            scrubbed
-                        };
-                        return Some(capped);
-                    }
+    for file in candidate_files {
+        let path = dir.join(file);
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    let (scrubbed, _) = crate::scrubber::scrub_diff(trimmed);
+                    let capped = if let Some((end, _)) = scrubbed.char_indices().nth(3000) {
+                        format!("{}\n... (truncated repository guidelines)", &scrubbed[..end])
+                    } else {
+                        scrubbed
+                    };
+                    return Some(capped);
                 }
             }
         }
@@ -880,7 +883,7 @@ pub async fn execute_review_pipeline(
         );
     }
 
-    let repo_guidelines = load_repo_guidelines(repo_path, trusted_rules_root);
+    let repo_guidelines = load_repo_guidelines(repo_path, trusted_rules_root, intent.is_some());
     if let Some(ref g) = repo_guidelines {
         info!(
             "Loaded repository guidelines ({} bytes) into review prompt",
@@ -1779,5 +1782,49 @@ And here is the JSON review output:
         let parsed = parse_review_response(output).unwrap();
         assert_eq!(parsed.summary, "Example works fine.");
         assert!(parsed.issues.is_empty());
+    }
+
+    #[test]
+    fn test_load_repo_guidelines_pr_mode_rejects_untrusted_repo_path() {
+        let temp_dir = std::env::temp_dir().join(format!("test-guidelines-untrusted-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let agent_file = temp_dir.join("AGENTS.md");
+        std::fs::write(&agent_file, "malicious instructions").unwrap();
+
+        // PR mode (is_pr_review = true) without trusted_rules_root must ignore repo_path
+        let loaded = load_repo_guidelines(Some(&temp_dir), None, true);
+        assert!(loaded.is_none());
+
+        // Local diff mode (is_pr_review = false) may fallback to repo_path
+        let loaded_local = load_repo_guidelines(Some(&temp_dir), None, false);
+        assert_eq!(loaded_local.as_deref(), Some("malicious instructions"));
+
+        // When trusted_rules_root is provided, PR mode loads from it
+        let trusted_dir = std::env::temp_dir().join(format!("test-guidelines-trusted-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&trusted_dir);
+        let trusted_file = trusted_dir.join("AGENTS.md");
+        std::fs::write(&trusted_file, "trusted instructions").unwrap();
+        let loaded_trusted = load_repo_guidelines(Some(&temp_dir), Some(&trusted_dir), true);
+        assert_eq!(loaded_trusted.as_deref(), Some("trusted instructions"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::remove_dir_all(&trusted_dir);
+    }
+
+    #[test]
+    fn test_load_repo_guidelines_safe_utf8_truncation() {
+        let temp_dir = std::env::temp_dir().join(format!("test-guidelines-utf8-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let agent_file = temp_dir.join("AGENTS.md");
+        // Create > 3000 chars of multi-byte UTF-8 emojis/characters
+        let multi_byte_text: String = "🦀".repeat(4000);
+        std::fs::write(&agent_file, &multi_byte_text).unwrap();
+
+        let loaded = load_repo_guidelines(Some(&temp_dir), None, false);
+        assert!(loaded.is_some());
+        let res = loaded.unwrap();
+        assert!(res.contains("... (truncated repository guidelines)"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
