@@ -5,14 +5,23 @@ import { defineConfig } from 'vite';
 export default defineConfig({
 	plugins: [
 		sveltekit({
-			compilerOptions: {
-				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
-				runes: ({ filename }) =>
-					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
-			},
 			adapter: adapter({
 				fallback: '200.html'
-			})
+			}),
+			compilerOptions: {
+				experimental: {
+					async: true
+				},
+				fragments: 'html'
+			},
+			dynamicCompileOptions({ filename }) {
+				if (!filename.includes('node_modules')) {
+					return { runes: true };
+				}
+			},
+			experimental: {
+				forkPreloads: true
+			}
 		})
 	],
 	server: {
