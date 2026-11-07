@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@import "@kleinbem/web-config/theme";
+@import "@kleinbem/web-config/base.css";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, .dark, .dark *));
