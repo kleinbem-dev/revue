@@ -32,9 +32,17 @@ pub struct PrMetadata {
     #[serde(default)]
     pub head_sha: String,
     #[serde(default)]
+    pub head_ref: String,
+    #[serde(default)]
     pub base_ref: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub pr_number: u64,
+    #[serde(default)]
+    pub is_draft: bool,
 }
 
 #[async_trait]

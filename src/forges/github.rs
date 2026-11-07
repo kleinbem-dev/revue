@@ -105,12 +105,19 @@ impl Forge for GitHubClient {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let head_ref = val
+            .get("head")
+            .and_then(|h| h.get("ref"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let base_ref = val
             .get("base")
             .and_then(|b| b.get("ref"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let is_draft = val.get("draft").and_then(|d| d.as_bool()).unwrap_or(false);
         let labels = val
             .get("labels")
             .and_then(|l| l.as_array())
@@ -127,8 +134,12 @@ impl Forge for GitHubClient {
             description,
             author,
             head_sha,
+            head_ref,
             base_ref,
             labels,
+            repo: repo.to_string(),
+            pr_number: pr_index,
+            is_draft,
         })
     }
 

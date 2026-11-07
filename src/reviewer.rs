@@ -436,6 +436,36 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
     let mut s = String::new();
     if let Some(meta) = intent {
         s.push_str("\nPULL REQUEST INTENT & CONTEXT:\n");
+        if !meta.repo.is_empty() {
+            if meta.pr_number > 0 {
+                s.push_str(&format!(
+                    "- Target Repository: `{}` (PR #{})\n",
+                    meta.repo, meta.pr_number
+                ));
+            } else {
+                s.push_str(&format!("- Target Repository: `{}`\n", meta.repo));
+            }
+        }
+        if !meta.base_ref.is_empty() || !meta.head_ref.is_empty() {
+            let base = if meta.base_ref.is_empty() {
+                "main"
+            } else {
+                &meta.base_ref
+            };
+            let head = if meta.head_ref.is_empty() {
+                if meta.head_sha.is_empty() {
+                    "HEAD"
+                } else {
+                    &meta.head_sha[..meta.head_sha.len().min(8)]
+                }
+            } else {
+                &meta.head_ref
+            };
+            s.push_str(&format!("- Branches: `{}` → `{}`\n", head, base));
+        }
+        if meta.is_draft {
+            s.push_str("- Status: Draft (work in progress)\n");
+        }
         s.push_str(&format!(
             "- Title: {}\n",
             crate::scrubber::scrub_text(&meta.title)
@@ -455,22 +485,66 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
     s
 }
 
+/// Loads and scrubs repository guidelines from AGENTS.md, CLAUDE.md, or CONTRIBUTING.md.
+pub fn load_repo_guidelines(
+    repo_path: Option<&std::path::Path>,
+    trusted_rules_root: Option<&std::path::Path>,
+) -> Option<String> {
+    let candidate_dirs = [trusted_rules_root, repo_path];
+    let candidate_files = ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"];
+
+    for dir in candidate_dirs.into_iter().flatten() {
+        for file in candidate_files {
+            let path = dir.join(file);
+            if path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        let (scrubbed, _) = crate::scrubber::scrub_diff(trimmed);
+                        let capped = if scrubbed.len() > 3000 {
+                            let end = scrubbed
+                                .char_indices()
+                                .nth(3000)
+                                .map(|(i, _)| i)
+                                .unwrap_or(3000);
+                            format!("{}\n... (truncated repository guidelines)", &scrubbed[..end])
+                        } else {
+                            scrubbed
+                        };
+                        return Some(capped);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Generates the Pass 1 Detective prompt for broad defect discovery.
 pub fn generate_pass1_detective_prompt(
     diff: &ParsedDiff,
     config: &RevueConfig,
     pass0_findings: &[ReviewIssue],
     intent: Option<&PrMetadata>,
+    repo_guidelines: Option<&str>,
 ) -> String {
     config
         .validate()
         .expect("config must be valid before prompt generation");
     let mut rules_text = String::new();
+    if let Some(guidelines) = repo_guidelines {
+        rules_text.push_str("REPOSITORY GUIDELINES (from repository AGENTS.md / rules):\n");
+        rules_text.push_str(guidelines);
+        rules_text.push_str("\n\nCONFIGURED REVIEW RULES:\n");
+    }
     for rule in &config.review.rules {
         rules_text.push_str(&format!(
             "- For files matching `{}`: {}\n",
             rule.path, rule.instructions
         ));
+    }
+    if rules_text.is_empty() {
+        rules_text.push_str("(No custom repository rules configured)\n");
     }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
@@ -525,6 +599,7 @@ CODE UNDER REVIEW:
 }
 
 /// Generates the Pass 2 Judge prompt for rigorous defect verification and filtering.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_pass2_judge_prompt(
     diff: &ParsedDiff,
     config: &RevueConfig,
@@ -533,17 +608,26 @@ pub fn generate_pass2_judge_prompt(
     pass0_findings: &[ReviewIssue],
     intent: Option<&PrMetadata>,
     comments: &[crate::forges::DiscussionComment],
+    repo_guidelines: Option<&str>,
 ) -> String {
     config
         .validate()
         .expect("config must be valid before prompt generation");
     let tone = &config.review.tone;
     let mut rules_text = String::new();
+    if let Some(guidelines) = repo_guidelines {
+        rules_text.push_str("REPOSITORY GUIDELINES (from repository AGENTS.md / rules):\n");
+        rules_text.push_str(guidelines);
+        rules_text.push_str("\n\nCONFIGURED REVIEW RULES:\n");
+    }
     for rule in &config.review.rules {
         rules_text.push_str(&format!(
             "- For files matching `{}`: {}\n",
             rule.path, rule.instructions
         ));
+    }
+    if rules_text.is_empty() {
+        rules_text.push_str("(No custom repository rules configured)\n");
     }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
@@ -666,17 +750,26 @@ pub fn generate_single_pass_prompt(
     config: &RevueConfig,
     pass0_findings: &[ReviewIssue],
     intent: Option<&PrMetadata>,
+    repo_guidelines: Option<&str>,
 ) -> String {
     config
         .validate()
         .expect("config must be valid before prompt generation");
     let tone = &config.review.tone;
     let mut rules_text = String::new();
+    if let Some(guidelines) = repo_guidelines {
+        rules_text.push_str("REPOSITORY GUIDELINES (from repository AGENTS.md / rules):\n");
+        rules_text.push_str(guidelines);
+        rules_text.push_str("\n\nCONFIGURED REVIEW RULES:\n");
+    }
     for rule in &config.review.rules {
         rules_text.push_str(&format!(
             "- For files matching `{}`: {}\n",
             rule.path, rule.instructions
         ));
+    }
+    if rules_text.is_empty() {
+        rules_text.push_str("(No custom repository rules configured)\n");
     }
     let skills_text = get_skills_block(diff, config);
     let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
@@ -787,9 +880,23 @@ pub async fn execute_review_pipeline(
         );
     }
 
+    let repo_guidelines = load_repo_guidelines(repo_path, trusted_rules_root);
+    if let Some(ref g) = repo_guidelines {
+        info!(
+            "Loaded repository guidelines ({} bytes) into review prompt",
+            g.len()
+        );
+    }
+
     if !config.review.two_pass {
         info!("Running single-pass review pipeline");
-        let prompt = generate_single_pass_prompt(diff, config, &pass0_issues, intent);
+        let prompt = generate_single_pass_prompt(
+            diff,
+            config,
+            &pass0_issues,
+            intent,
+            repo_guidelines.as_deref(),
+        );
         let (resp, prov) = chain.complete_with_fallback(&prompt).await?;
         let mut parsed = parse_review_response(&resp)?;
         merge_pass0_findings(&mut parsed, pass0_issues);
@@ -808,7 +915,13 @@ pub async fn execute_review_pipeline(
     }
 
     info!("Executing Review Pass 1 (Detective - broad anomaly discovery)...");
-    let pass1_prompt = generate_pass1_detective_prompt(diff, config, &pass0_issues, intent);
+    let pass1_prompt = generate_pass1_detective_prompt(
+        diff,
+        config,
+        &pass0_issues,
+        intent,
+        repo_guidelines.as_deref(),
+    );
     let (pass1_candidates, provider_name) = chain.complete_with_fallback(&pass1_prompt).await?;
     let candidates_count = pass1_candidates
         .lines()
@@ -824,6 +937,7 @@ pub async fn execute_review_pipeline(
         &pass0_issues,
         intent,
         existing_comments,
+        repo_guidelines.as_deref(),
     );
     let (pass2_response, _) = chain.complete_with_fallback(&pass2_prompt).await?;
 
@@ -993,7 +1107,10 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     if format == "json" {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
-        println!("\n## nix-revue Analysis (Provider: {})\n", res.provider_used);
+        println!(
+            "\n## 🔍 Revue Code Analysis (`{}`) — Local Diff against `{}`\n",
+            res.provider_used, base
+        );
         println!("{}\n", res.summary);
 
         if res.issues.is_empty() {
@@ -1070,13 +1187,19 @@ pub async fn run_pr_review(
     };
 
     info!("Fetching PR #{} metadata and intent for {}", index, repo);
-    let metadata = forge.fetch_pr_metadata(repo, index).await.unwrap_or_else(|e| {
+    let mut metadata = forge.fetch_pr_metadata(repo, index).await.unwrap_or_else(|e| {
         tracing::warn!("Failed to fetch PR metadata (intent will be omitted): {}", e);
         PrMetadata {
             title: format!("PR #{}", index),
             ..Default::default()
         }
     });
+    if metadata.repo.is_empty() {
+        metadata.repo = repo.to_string();
+    }
+    if metadata.pr_number == 0 {
+        metadata.pr_number = index;
+    }
 
     info!("Fetching PR #{} diff for {}", index, repo);
     let raw_diff = forge.fetch_pr_diff(repo, index).await?;
@@ -1195,10 +1318,28 @@ pub async fn run_pr_review(
         String::new()
     };
 
+    let base_ref_display = if metadata.base_ref.is_empty() {
+        String::new()
+    } else {
+        format!("- **Base Branch:** `{}`\n", metadata.base_ref)
+    };
+
+    let head_ref_display = if metadata.head_ref.is_empty() {
+        String::new()
+    } else {
+        format!("- **Source Branch:** `{}`\n", metadata.head_ref)
+    };
+
     let summary = format!(
-        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`)\n\n{}---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Target Head:** `{}`\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
+        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`) — {} #{}\n\n{}---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Repository:** `{}`\n- **Pull Request:** #{}\n{}{}- **Target Head:** `{}`\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
         res.provider_used,
+        repo,
+        index,
         summary_text,
+        repo,
+        index,
+        base_ref_display,
+        head_ref_display,
         head_sha_display,
         parsed.files.len(),
         inline_comments.len(),
@@ -1358,7 +1499,7 @@ mod tests {
             confidence: Some(10),
         }];
 
-        let prompt = generate_pass1_detective_prompt(&diff, &config, &pass0_findings, None);
+        let prompt = generate_pass1_detective_prompt(&diff, &config, &pass0_findings, None, None);
         assert!(prompt.contains("DETERMINISTIC AST RULES (PASS 0 FINDINGS):"));
         assert!(prompt.contains("AST Rule: unused-var"));
         assert!(prompt.contains("Variable x is unused"));
@@ -1427,15 +1568,33 @@ mod tests {
             description: "Resolves #42 by printing greeting on boot".to_string(),
             author: "alice".to_string(),
             head_sha: "abcdef12".to_string(),
+            head_ref: "feature/greeting".to_string(),
             base_ref: "main".to_string(),
             labels: vec!["enhancement".to_string()],
+            repo: "kleinbem/jj-toolbox".to_string(),
+            pr_number: 42,
+            is_draft: false,
         };
 
-        let prompt = generate_pass1_detective_prompt(&diff, &config, &[], Some(&metadata));
+        let prompt = generate_pass1_detective_prompt(&diff, &config, &[], Some(&metadata), None);
         assert!(prompt.contains("PULL REQUEST INTENT & CONTEXT:"));
+        assert!(prompt.contains("Target Repository: `kleinbem/jj-toolbox` (PR #42)"));
+        assert!(prompt.contains("Branches: `feature/greeting` → `main`"));
         assert!(prompt.contains("Title: feat(greeting): add friendly welcome message"));
         assert!(prompt.contains("Author: alice"));
         assert!(prompt.contains("Description:\n```markdown\nResolves #42"));
+    }
+
+    #[test]
+    fn test_pass1_detective_prompt_with_repo_guidelines() {
+        let diff_str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,3 @@\n fn main() {\n+    println!(\"hello\");\n }\n";
+        let diff = ParsedDiff::parse(diff_str).unwrap();
+        let config = RevueConfig::default();
+        let guidelines = "Every commit must be signed with YubiKey.\nNever hardcode main.";
+        let prompt = generate_pass1_detective_prompt(&diff, &config, &[], None, Some(guidelines));
+        assert!(prompt.contains("REPOSITORY GUIDELINES (from repository AGENTS.md / rules):"));
+        assert!(prompt.contains("Every commit must be signed with YubiKey."));
+        assert!(prompt.contains("Never hardcode main."));
     }
 
     #[test]
@@ -1531,6 +1690,7 @@ mod tests {
             &[],
             None,
             &comments,
+            None,
         );
 
         assert!(prompt.contains("PREVIOUSLY DISMISSED FALSE POSITIVES"));
