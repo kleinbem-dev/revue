@@ -6,4 +6,4 @@ reason = "unsafe-libyaml is unmaintained, no fixed release; comes in via serde_y
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0459"
 ignoreUntil = 2027-02-09
-reason = "No sqlx release allows the fixed libsqlite3-sys 0.39 (sqlx-sqlite 0.9.0 requires <0.38); revue only opens its own revue.db in its state directory, so a planted -wal file needs write access there already. Tracked in kleinbem-dev/revue#46"
+reason = "No sqlx release allows the fixed libsqlite3-sys 0.39 (sqlx-sqlite 0.9.0 requires <0.38). The default database is revue.db in revue's state directory; DATABASE_URL or --database-url can point elsewhere. Exposure needs a less-trusted user able to write the database's directory (to plant the -wal file). Tracked in kleinbem-dev/revue#46"
