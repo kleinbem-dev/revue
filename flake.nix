@@ -6,7 +6,7 @@
   };
 
   outputs =
-    inputs@{ self, nixpkgs }:
+    { self, nixpkgs }:
     let
       inherit (nixpkgs) lib;
       systems = [
@@ -76,18 +76,13 @@
         nix-revue = self.packages.${final.stdenv.hostPlatform.system}.default;
       };
 
-      nixosModules.default =
-        {
-          config,
-          lib,
-          pkgs,
-          ...
-        }:
-        {
+      nixosModules = {
+        default = {
           imports = [ ./nix/module.nix ];
           nixpkgs.overlays = [ self.overlays.default ];
         };
-      nixosModules.revue = self.nixosModules.default;
-      nixosModules.nix-revue = self.nixosModules.default;
+        revue = self.nixosModules.default;
+        nix-revue = self.nixosModules.default;
+      };
     };
 }
