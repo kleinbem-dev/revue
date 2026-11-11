@@ -29,11 +29,12 @@ pub struct DiffHunk {
 impl ParsedDiff {
     /// Parse unified diff text (e.g. from `git diff` or Forgejo API)
     pub fn parse(diff_text: &str) -> Result<Self> {
-        let text = keep_stanzas_with_hunks(diff_text);
+        let text = keep_stanzas_with_hunks(diff_text)?;
         if !text.lines().any(|l| l.starts_with("@@")) {
             return Ok(Self { files: Vec::new() });
         }
         // patch 0.7 asserts on input it can't consume; a review should fail, not panic.
+        // upstream: uniphil/patch-rs#24, uniphil/patch-rs#25
         let patches = std::panic::catch_unwind(|| patch::Patch::from_multiple(&text))
             .map_err(|_| anyhow::anyhow!("Failed to parse unified diff: parser panicked"))?
             .map_err(|e| anyhow::anyhow!("Failed to parse unified diff: {}", e))?;
@@ -489,26 +490,32 @@ fn effective_path(f: &FilePatch) -> &str {
 
 /// Drops `diff --git` stanzas without a hunk (binary files, pure renames, mode changes):
 /// the patch crate needs a hunk per file and panics on a trailing hunkless stanza.
-fn keep_stanzas_with_hunks(diff_text: &str) -> std::borrow::Cow<'_, str> {
+/// A stanza with `---`/`+++` headers but no hunk is a truncated diff and an error.
+fn keep_stanzas_with_hunks(diff_text: &str) -> Result<std::borrow::Cow<'_, str>> {
     if !diff_text.lines().any(|l| l.starts_with("diff --git ")) {
-        return std::borrow::Cow::Borrowed(diff_text);
+        return Ok(std::borrow::Cow::Borrowed(diff_text));
     }
     let mut kept = String::with_capacity(diff_text.len());
+    let mut stanzas = Vec::new();
     let mut stanza = String::new();
-    let mut flush = |stanza: &mut String| {
-        if stanza.lines().any(|l| l.starts_with("@@")) {
-            kept.push_str(stanza);
-        }
-        stanza.clear();
-    };
     for line in diff_text.split_inclusive('\n') {
-        if line.starts_with("diff --git ") {
-            flush(&mut stanza);
+        if line.starts_with("diff --git ") && !stanza.is_empty() {
+            stanzas.push(std::mem::take(&mut stanza));
         }
         stanza.push_str(line);
     }
-    flush(&mut stanza);
-    std::borrow::Cow::Owned(kept)
+    stanzas.push(stanza);
+    for stanza in stanzas {
+        if stanza.lines().any(|l| l.starts_with("@@")) {
+            kept.push_str(&stanza);
+        } else if let Some(header) = stanza.lines().find(|l| l.starts_with("+++ ")) {
+            return Err(anyhow::anyhow!(
+                "Incomplete diff: `{}` has file headers but no hunk",
+                header.trim_start_matches("+++ ").trim()
+            ));
+        }
+    }
+    Ok(std::borrow::Cow::Owned(kept))
 }
 
 fn clean_diff_path(path: &str) -> String {
@@ -781,6 +788,16 @@ new mode 100755
         .unwrap();
         let paths: Vec<_> = diff.files.iter().map(|f| f.new_path.as_str()).collect();
         assert_eq!(paths, ["src/lib.rs", "src/two.rs"]);
+    }
+
+    #[test]
+    fn test_parse_rejects_text_stanza_without_hunk() {
+        let truncated =
+            "diff --git a/src/x.rs b/src/x.rs\nindex 1..2 100644\n--- a/src/x.rs\n+++ b/src/x.rs\n";
+        let err = ParsedDiff::parse(&format!("{TEXT_STANZA}{truncated}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("b/src/x.rs"), "{err}");
     }
 
     #[test]

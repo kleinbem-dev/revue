@@ -49,6 +49,9 @@ fn default_severity() -> String {
     "warning".to_string()
 }
 
+/// Summary when no changed file is left to review; no model is called then.
+pub const NO_REVIEWABLE_CHANGES: &str = "No reviewable text changes: every changed file is binary, a pure rename or mode change, or matches review.ignore.";
+
 /// Constructs the prioritized provider cascade from configuration.
 pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
     let mut providers: Vec<Box<dyn Provider>> = Vec::new();
@@ -1124,6 +1127,15 @@ pub async fn review_diff_content(
 ) -> Result<(ReviewOutput, String)> {
     let config = RevueConfig::find_and_load(config_path)?;
     let parsed = crate::diff::ParsedDiff::parse(raw_diff)?;
+    if parsed.files.is_empty() {
+        return Ok((
+            ReviewOutput {
+                summary: NO_REVIEWABLE_CHANGES.to_string(),
+                issues: Vec::new(),
+            },
+            "none".to_string(),
+        ));
+    }
     let chain = build_provider_chain(&config);
     let res = execute_review_pipeline(&parsed, &config, &chain, &[], None, None, None, &[]).await?;
     Ok((
@@ -1150,6 +1162,10 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     }
 
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
+    if parsed.files.is_empty() {
+        println!("No reviewable text changes: only binary files, renames or mode changes.");
+        return Ok(());
+    }
     parsed.apply_filters(&config.review.ignore);
 
     if parsed.files.is_empty() {
@@ -1286,6 +1302,20 @@ pub async fn run_pr_review(
     }
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
     parsed.apply_filters(&config.review.ignore);
+    if parsed.files.is_empty() {
+        info!(
+            "PR #{} has no reviewable text changes; skipping the model and the post",
+            index
+        );
+        return Ok(ReviewExecutionResult {
+            summary: NO_REVIEWABLE_CHANGES.to_string(),
+            issues: Vec::new(),
+            provider_used: "none".to_string(),
+            pass1_candidates: 0,
+            pass2_verified: 0,
+            duration_ms: 0,
+        });
+    }
 
     // Ephemeral checkout at the exact PR head SHA for Semgrep and disk context
     let tree_guard = if !metadata.head_sha.is_empty() {
@@ -1991,5 +2021,14 @@ And here is the JSON review output:
         assert!(prompt.contains("[... truncated]"));
         assert!(prompt.contains("more comments omitted]"));
         assert!(prompt.matches("@bob").count() <= MAX_COMMENTS_CHARS / MAX_COMMENT_CHARS);
+    }
+
+    #[tokio::test]
+    async fn test_review_without_reviewable_files_skips_the_model() {
+        let binary_only = "diff --git a/logo.png b/logo.png\nindex 1..2 100644\nBinary files a/logo.png and b/logo.png differ\n";
+        let (out, provider) = review_diff_content(binary_only, None).await.unwrap();
+        assert_eq!(provider, "none");
+        assert_eq!(out.summary, NO_REVIEWABLE_CHANGES);
+        assert!(out.issues.is_empty());
     }
 }
