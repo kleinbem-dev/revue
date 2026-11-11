@@ -59,8 +59,32 @@ impl GeminiProvider {
         Ok(Self {
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
         })
+    }
+}
+
+impl GeminiProvider {
+    /// The key goes in a header: a `?key=` URL ends up in error messages, logs and the database.
+    fn request(&self, prompt: &str) -> reqwest::RequestBuilder {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
+        );
+        let req = GeminiRequest {
+            contents: vec![Content {
+                parts: vec![Part { text: prompt }],
+            }],
+        };
+        let mut builder = self.client.post(url).json(&req);
+        if let Ok(mut key) = reqwest::header::HeaderValue::from_str(&self.api_key) {
+            key.set_sensitive(true);
+            builder = builder.header("x-goog-api-key", key);
+        }
+        builder
     }
 }
 
@@ -104,30 +128,20 @@ impl Provider for GeminiProvider {
     }
 
     async fn complete(&self, prompt: &str) -> Result<String> {
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, self.api_key
-        );
-
-        let req = GeminiRequest {
-            contents: vec![Content {
-                parts: vec![Part { text: prompt }],
-            }],
-        };
-
         let res = self
-            .client
-            .post(&url)
-            .json(&req)
+            .request(prompt)
             .send()
             .await
-            .map_err(|e| anyhow!("Gemini API request failed: {}", e))?;
+            // reqwest errors print the URL; keep them free of it in case a key lands there again.
+            .map_err(|e| anyhow!("Gemini API request failed: {}", e.without_url()))?;
 
         let status = res.status();
-        let body: GeminiResponse = res
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse Gemini API JSON response: {}", e))?;
+        let body: GeminiResponse = res.json().await.map_err(|e| {
+            anyhow!(
+                "Failed to parse Gemini API JSON response: {}",
+                e.without_url()
+            )
+        })?;
 
         if !status.is_success() {
             let msg = body
@@ -147,5 +161,26 @@ impl Provider for GeminiProvider {
             .ok_or_else(|| anyhow!("Gemini returned empty candidate output"))?;
 
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_goes_in_a_header_not_the_url() {
+        let provider = GeminiProvider {
+            api_key: "test-secret-key".to_string(),
+            model: "gemini-2.0-flash".to_string(),
+            client: reqwest::Client::new(),
+        };
+        let req = provider.request("hi").build().unwrap();
+        assert!(!req.url().as_str().contains("test-secret-key"));
+        assert!(req.url().query().is_none());
+        let key = &req.headers()["x-goog-api-key"];
+        assert_eq!(key, "test-secret-key");
+        assert!(key.is_sensitive());
+        assert!(!format!("{:?}", req).contains("test-secret-key"));
     }
 }
