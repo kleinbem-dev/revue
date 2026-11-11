@@ -43,6 +43,8 @@
               lockFile = ./Cargo.lock;
             };
             nativeBuildInputs = [ pkgs.pkg-config ];
+            # nixpkgs' cargo hook links libsqlite3-sys to the system sqlite.
+            buildInputs = [ pkgs.sqlite ];
             postInstall = ''
               ln -s $out/bin/revue $out/bin/nix-revue
               mkdir -p $out/share/revue/web
