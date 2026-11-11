@@ -136,6 +136,12 @@ Add to your NixOS configuration:
 }
 ```
 
+With `user` set, revue keeps its state in `~/.local/share/revue`, and persisting
+that home directory is up to the host. On an impermanence host with an ephemeral
+`/home`, add it yourself, e.g.
+`environment.persistence."/nix/persist".users.martin.directories = [ ".local/share/revue" ];`.
+Without `user`, the module persists `/var/lib/private/revue` itself.
+
 ---
 
 ## CLI Usage
