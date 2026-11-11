@@ -1,5 +1,5 @@
-use super::Provider;
-use anyhow::{anyhow, Result};
+use super::{Provider, cli};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use tokio::process::Command;
 
@@ -31,23 +31,24 @@ impl Provider for AntigravityCliProvider {
     }
 
     async fn complete(&self, prompt: &str) -> Result<String> {
+        // -p only takes the prompt as an argument; fail over cleanly instead of E2BIG.
+        if prompt.len() > cli::MAX_ARG_BYTES {
+            return Err(anyhow!(
+                "Prompt is {} bytes, above the {}-byte argument limit for the antigravity CLI",
+                prompt.len(),
+                cli::MAX_ARG_BYTES
+            ));
+        }
         let effort = std::env::var("REVUE_GEMINI_EFFORT").unwrap_or_else(|_| "low".to_string());
-        let output = Command::new(&self.bin_path)
-            .arg("--sandbox")
+        let mut cmd = Command::new(&self.bin_path);
+        cmd.arg("--sandbox")
             .arg("--disable-slash-commands")
             .arg("--effort")
             .arg(&effort)
             .arg("-p")
-            .arg(prompt)
-            .output()
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to spawn antigravity CLI at '{}': {}",
-                    self.bin_path,
-                    e
-                )
-            })?;
+            .arg(prompt);
+        let what = format!("antigravity CLI at '{}'", self.bin_path);
+        let output = cli::run(cmd, None, cli::cli_timeout(), &what).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -65,5 +66,20 @@ impl Provider for AntigravityCliProvider {
         }
 
         Ok(stdout)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn oversized_prompt_fails_over_without_spawning() {
+        let provider = AntigravityCliProvider {
+            bin_path: "/nonexistent/antigravity-cli".to_string(),
+        };
+        let prompt = "x".repeat(cli::MAX_ARG_BYTES + 1);
+        let err = provider.complete(&prompt).await.unwrap_err().to_string();
+        assert!(err.contains("argument limit"), "{err}");
     }
 }
