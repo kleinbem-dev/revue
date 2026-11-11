@@ -671,11 +671,12 @@ fn format_existing_comments(comments: &[crate::forges::DiscussionComment]) -> St
             crate::scrubber::scrub_text(&c.body).trim(),
             MAX_COMMENT_CHARS,
         );
-        if used + body.len() > MAX_COMMENTS_CHARS {
+        let chars = body.chars().count();
+        if used + chars > MAX_COMMENTS_CHARS {
             out.push_str(&format!("[{} more comments omitted]\n", comments.len() - i));
             break;
         }
-        used += body.len();
+        used += chars;
         out.push_str(&format!(
             "- @{} on {}:\n{}\n",
             inline_untrusted(&c.author),
@@ -1962,6 +1963,19 @@ And here is the JSON review output:
         ] {
             assert!(prompt.starts_with(PROMPT_PREAMBLE), "{prompt}");
         }
+    }
+
+    #[test]
+    fn test_comment_budget_counts_characters_not_bytes() {
+        // 1,000 three-byte characters each: 8 comments fit in 12,000 characters.
+        let comment = crate::forges::DiscussionComment {
+            author: "chen".to_string(),
+            path: None,
+            line: None,
+            body: "界".repeat(1_000),
+        };
+        let prompt = judge_prompt_with(&vec![comment; 12], None);
+        assert_eq!(prompt.matches("@chen").count(), MAX_COMMENTS_CHARS / 1_000);
     }
 
     #[test]
