@@ -41,7 +41,7 @@ impl Provider for ClaudeCliProvider {
     async fn complete(&self, prompt: &str) -> Result<String> {
         // Empty cwd: no project settings or CLAUDE.md. Prompt on stdin: no E2BIG.
         let workdir = cli::EmptyDir::new("revue-claude")?;
-        let mut cmd = Command::new(&self.bin_path);
+        let mut cmd = Command::new(cli::resolve_program(&self.bin_path));
         cmd.args(ARGS).current_dir(workdir.path());
         let what = format!("claude CLI at '{}'", self.bin_path);
         let output = cli::run(cmd, Some(prompt), cli::cli_timeout(), &what).await?;

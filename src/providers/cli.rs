@@ -22,6 +22,19 @@ pub fn cli_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Makes a relative program path with a directory part (`./bin/claude`) absolute, so it still
+/// resolves after `current_dir` changes. A bare name like `claude` keeps the PATH lookup.
+pub fn resolve_program(bin: &str) -> PathBuf {
+    let path = PathBuf::from(bin);
+    if path.is_relative()
+        && path.components().count() > 1
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        return cwd.join(path);
+    }
+    path
+}
+
 /// An empty directory, removed on drop, so a CLI finds no project files or settings.
 pub struct EmptyDir(PathBuf);
 
@@ -121,6 +134,18 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn resolves_relative_program_paths_only() {
+        assert_eq!(resolve_program("claude"), PathBuf::from("claude"));
+        assert_eq!(
+            resolve_program("/usr/bin/claude"),
+            PathBuf::from("/usr/bin/claude")
+        );
+        let rel = resolve_program("./bin/claude");
+        assert!(rel.is_absolute());
+        assert!(rel.ends_with("bin/claude"));
     }
 
     #[test]
