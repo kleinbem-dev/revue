@@ -142,18 +142,13 @@ in
         };
       }
       # /var is tmpfs on the fleet; persist the state directory across reboots.
-      # optionalAttrs avoids error on hosts without the impermanence module.
+      # A user's state is in their home, which the host persists (or mounts
+      # from disk, where impermanence rejects it). optionalAttrs: hosts
+      # without the impermanence module.
       (lib.optionalAttrs (options.environment ? persistence) {
-        environment.persistence."${cfg.persistencePath}" = {
-          directories = lib.optionals (cfg.user == null) [
-            "/var/lib/private/revue"
-          ];
-          users = lib.optionalAttrs (cfg.user != null) {
-            "${cfg.user}".directories = [
-              ".local/share/revue"
-            ];
-          };
-        };
+        environment.persistence."${cfg.persistencePath}".directories = lib.optionals (cfg.user == null) [
+          "/var/lib/private/revue"
+        ];
       })
     ]
   );
