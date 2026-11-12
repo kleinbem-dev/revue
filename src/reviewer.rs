@@ -49,6 +49,9 @@ fn default_severity() -> String {
     "warning".to_string()
 }
 
+/// Summary when no changed file is left to review; no model is called then.
+pub const NO_REVIEWABLE_CHANGES: &str = "No reviewable text changes: every changed file is binary, a pure rename or mode change, or matches review.ignore.";
+
 /// Constructs the prioritized provider cascade from configuration.
 pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
     let mut providers: Vec<Box<dyn Provider>> = Vec::new();
@@ -1124,6 +1127,15 @@ pub async fn review_diff_content(
 ) -> Result<(ReviewOutput, String)> {
     let config = RevueConfig::find_and_load(config_path)?;
     let parsed = crate::diff::ParsedDiff::parse(raw_diff)?;
+    if parsed.files.is_empty() {
+        return Ok((
+            ReviewOutput {
+                summary: NO_REVIEWABLE_CHANGES.to_string(),
+                issues: Vec::new(),
+            },
+            "none".to_string(),
+        ));
+    }
     let chain = build_provider_chain(&config);
     let res = execute_review_pipeline(&parsed, &config, &chain, &[], None, None, None, &[]).await?;
     Ok((
@@ -1135,6 +1147,27 @@ pub async fn review_diff_content(
     ))
 }
 
+/// Why no review ran, as the same JSON shape a review produces when JSON was asked for.
+fn without_review_output(format: &str, message: &str) -> Result<String> {
+    if format != "json" {
+        return Ok(message.to_string());
+    }
+    let res = ReviewExecutionResult {
+        summary: message.to_string(),
+        issues: Vec::new(),
+        provider_used: "none".to_string(),
+        pass1_candidates: 0,
+        pass2_verified: 0,
+        duration_ms: 0,
+    };
+    Ok(serde_json::to_string_pretty(&res)?)
+}
+
+fn print_without_review(format: &str, message: &str) -> Result<()> {
+    println!("{}", without_review_output(format, message)?);
+    Ok(())
+}
+
 /// Runs a code review on local working copy diff against the specified base.
 pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>) -> Result<()> {
     let config = RevueConfig::find_and_load(config_path)?;
@@ -1142,19 +1175,29 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
 
     let raw_diff = fetch_local_diff(base)?;
     if raw_diff.trim().is_empty() {
-        println!(
-            "No changes detected between working copy and '{}' (checked git and jj).",
-            base
+        return print_without_review(
+            format,
+            &format!(
+                "No changes detected between working copy and '{}' (checked git and jj).",
+                base
+            ),
         );
-        return Ok(());
     }
 
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
+    if parsed.files.is_empty() {
+        return print_without_review(
+            format,
+            "No reviewable text changes: only binary files, renames or mode changes.",
+        );
+    }
     parsed.apply_filters(&config.review.ignore);
 
     if parsed.files.is_empty() {
-        println!("All changed files were ignored by review.ignore rules.");
-        return Ok(());
+        return print_without_review(
+            format,
+            "All changed files were ignored by review.ignore rules.",
+        );
     }
 
     // Enrich with actual surrounding code from disk
@@ -1203,6 +1246,36 @@ pub async fn run_diff_review(base: &str, format: &str, config_path: Option<&str>
     }
 
     Ok(())
+}
+
+/// Stores a finished review so the dashboard lists it once it leaves the in-memory running set.
+async fn persist_review(
+    db: Option<&crate::db::DbPool>,
+    repo: &str,
+    index: u64,
+    metadata: &PrMetadata,
+    res: &ReviewExecutionResult,
+) {
+    let Some(pool) = db else { return };
+    let findings_json = serde_json::to_string(&res.issues).unwrap_or_else(|_| "[]".to_string());
+    let rec = crate::db::NewReviewRecord {
+        repo,
+        pr_number: index as i64,
+        title: &metadata.title,
+        author: &metadata.author,
+        status: "completed",
+        provider_used: &res.provider_used,
+        pass1: res.pass1_candidates as i64,
+        pass2: res.pass1_candidates.saturating_sub(res.pass2_verified) as i64,
+        verified: res.pass2_verified as i64,
+        cost_saved: 0.0,
+        duration_ms: res.duration_ms as i64,
+        summary: &res.summary,
+        findings_json: &findings_json,
+    };
+    if let Err(e) = pool.record_review(&rec).await {
+        tracing::warn!("Failed to persist review for {} #{}: {}", repo, index, e);
+    }
 }
 
 /// Executes end-to-end pull request review with PR intent, ephemeral tree binding, and persistence.
@@ -1286,6 +1359,22 @@ pub async fn run_pr_review(
     }
     let mut parsed = ParsedDiff::parse(&raw_diff)?;
     parsed.apply_filters(&config.review.ignore);
+    if parsed.files.is_empty() {
+        info!(
+            "PR #{} has no reviewable text changes; skipping the model and the post",
+            index
+        );
+        let res = ReviewExecutionResult {
+            summary: NO_REVIEWABLE_CHANGES.to_string(),
+            issues: Vec::new(),
+            provider_used: "none".to_string(),
+            pass1_candidates: 0,
+            pass2_verified: 0,
+            duration_ms: 0,
+        };
+        persist_review(db, repo, index, &metadata, &res).await;
+        return Ok(res);
+    }
 
     // Ephemeral checkout at the exact PR head SHA for Semgrep and disk context
     let tree_guard = if !metadata.head_sha.is_empty() {
@@ -1428,28 +1517,7 @@ pub async fn run_pr_review(
             .await?;
     }
 
-    // Persist real review to database if available
-    if let Some(pool) = db {
-        let findings_json = serde_json::to_string(&res.issues).unwrap_or_else(|_| "[]".to_string());
-        let rec = crate::db::NewReviewRecord {
-            repo,
-            pr_number: index as i64,
-            title: &metadata.title,
-            author: &metadata.author,
-            status: "completed",
-            provider_used: &res.provider_used,
-            pass1: res.pass1_candidates as i64,
-            pass2: res.pass1_candidates.saturating_sub(res.pass2_verified) as i64,
-            verified: res.pass2_verified as i64,
-            cost_saved: 0.0,
-            duration_ms: res.duration_ms as i64,
-            summary: &res.summary,
-            findings_json: &findings_json,
-        };
-        if let Err(e) = pool.record_review(&rec).await {
-            tracing::warn!("Failed to persist review for {} #{}: {}", repo, index, e);
-        }
-    }
+    persist_review(db, repo, index, &metadata, &res).await;
 
     Ok(res)
 }
@@ -1991,5 +2059,49 @@ And here is the JSON review output:
         assert!(prompt.contains("[... truncated]"));
         assert!(prompt.contains("more comments omitted]"));
         assert!(prompt.matches("@bob").count() <= MAX_COMMENTS_CHARS / MAX_COMMENT_CHARS);
+    }
+
+    #[tokio::test]
+    async fn test_review_without_reviewable_files_skips_the_model() {
+        let binary_only = "diff --git a/logo.png b/logo.png\nindex 1..2 100644\nBinary files a/logo.png and b/logo.png differ\n";
+        let (out, provider) = review_diff_content(binary_only, None).await.unwrap();
+        assert_eq!(provider, "none");
+        assert_eq!(out.summary, NO_REVIEWABLE_CHANGES);
+        assert!(out.issues.is_empty());
+    }
+
+    #[test]
+    fn test_no_review_output_is_json_when_asked() {
+        let json = without_review_output("json", "nothing to review").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["summary"], "nothing to review");
+        assert_eq!(v["provider_used"], "none");
+        assert!(v["issues"].as_array().unwrap().is_empty());
+        assert_eq!(
+            without_review_output("markdown", "nothing to review").unwrap(),
+            "nothing to review"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_review_is_persisted() {
+        let db = crate::db::DbPool::connect("sqlite::memory:").await.unwrap();
+        let meta = PrMetadata {
+            title: "chore: bump logo".to_string(),
+            author: "alice".to_string(),
+            ..Default::default()
+        };
+        let res = ReviewExecutionResult {
+            summary: NO_REVIEWABLE_CHANGES.to_string(),
+            issues: Vec::new(),
+            provider_used: "none".to_string(),
+            pass1_candidates: 0,
+            pass2_verified: 0,
+            duration_ms: 0,
+        };
+        persist_review(Some(&db), "owner/repo", 7, &meta, &res).await;
+        let recent = db.list_recent_reviews(10).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].summary, NO_REVIEWABLE_CHANGES);
     }
 }

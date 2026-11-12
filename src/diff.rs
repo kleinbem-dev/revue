@@ -29,7 +29,14 @@ pub struct DiffHunk {
 impl ParsedDiff {
     /// Parse unified diff text (e.g. from `git diff` or Forgejo API)
     pub fn parse(diff_text: &str) -> Result<Self> {
-        let patches = patch::Patch::from_multiple(diff_text)
+        let text = keep_stanzas_with_hunks(diff_text)?;
+        if !text.lines().any(|l| l.starts_with("@@")) {
+            return Ok(Self { files: Vec::new() });
+        }
+        // patch 0.7 asserts on input it can't consume; a review should fail, not panic.
+        // upstream: uniphil/patch-rs#24, uniphil/patch-rs#25
+        let patches = std::panic::catch_unwind(|| patch::Patch::from_multiple(&text))
+            .map_err(|_| anyhow::anyhow!("Failed to parse unified diff: parser panicked"))?
             .map_err(|e| anyhow::anyhow!("Failed to parse unified diff: {}", e))?;
 
         let mut files = Vec::new();
@@ -481,6 +488,36 @@ fn effective_path(f: &FilePatch) -> &str {
     }
 }
 
+/// Drops `diff --git` stanzas without a hunk (binary files, pure renames, mode changes):
+/// the patch crate needs a hunk per file and panics on a trailing hunkless stanza.
+/// A stanza with `---`/`+++` headers but no hunk is a truncated diff and an error.
+fn keep_stanzas_with_hunks(diff_text: &str) -> Result<std::borrow::Cow<'_, str>> {
+    if !diff_text.lines().any(|l| l.starts_with("diff --git ")) {
+        return Ok(std::borrow::Cow::Borrowed(diff_text));
+    }
+    let mut kept = String::with_capacity(diff_text.len());
+    let mut stanzas = Vec::new();
+    let mut stanza = String::new();
+    for line in diff_text.split_inclusive('\n') {
+        if line.starts_with("diff --git ") && !stanza.is_empty() {
+            stanzas.push(std::mem::take(&mut stanza));
+        }
+        stanza.push_str(line);
+    }
+    stanzas.push(stanza);
+    for stanza in stanzas {
+        if stanza.lines().any(|l| l.starts_with("@@")) {
+            kept.push_str(&stanza);
+        } else if let Some(header) = stanza.lines().find(|l| l.starts_with("+++ ")) {
+            return Err(anyhow::anyhow!(
+                "Incomplete diff: `{}` has file headers but no hunk",
+                header.trim_start_matches("+++ ").trim()
+            ));
+        }
+    }
+    Ok(std::borrow::Cow::Owned(kept))
+}
+
 fn clean_diff_path(path: &str) -> String {
     path.strip_prefix("a/")
         .or_else(|| path.strip_prefix("b/"))
@@ -688,5 +725,83 @@ mod tests {
     fn test_format_with_budget_zero_tokens_panics() {
         let diff = ParsedDiff::parse("--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n").unwrap();
         let _ = diff.format_with_budget(0);
+    }
+
+    // git extended headers: stanzas with no hunk (binary, rename, mode change).
+    const TEXT_STANZA: &str = "diff --git a/src/lib.rs b/src/lib.rs
+index 1111111..2222222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,3 @@
+ fn a() {}
++fn b() {}
+ fn c() {}
+";
+    const BINARY_STANZA: &str = "diff --git a/assets/logo.png b/assets/logo.png
+index 3333333..4444444 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ
+";
+    const RENAME_STANZA: &str = "diff --git a/old.txt b/new.txt
+similarity index 100%
+rename from old.txt
+rename to new.txt
+";
+    const MODE_STANZA: &str = "diff --git a/run.sh b/run.sh
+old mode 100644
+new mode 100755
+";
+
+    #[test]
+    fn test_parse_binary_stanza_last() {
+        let diff = ParsedDiff::parse(&format!("{TEXT_STANZA}{BINARY_STANZA}")).unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert!(diff.is_added_line("src/lib.rs", 2));
+    }
+
+    #[test]
+    fn test_parse_binary_stanza_first_keeps_following_file() {
+        let diff = ParsedDiff::parse(&format!("{BINARY_STANZA}{TEXT_STANZA}")).unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].new_path, "src/lib.rs");
+        assert!(diff.is_added_line("src/lib.rs", 2));
+    }
+
+    #[test]
+    fn test_parse_only_hunkless_stanzas_is_empty() {
+        for text in [
+            BINARY_STANZA.to_string(),
+            RENAME_STANZA.to_string(),
+            MODE_STANZA.to_string(),
+            format!("{BINARY_STANZA}{RENAME_STANZA}{MODE_STANZA}"),
+        ] {
+            let diff = ParsedDiff::parse(&text).unwrap();
+            assert!(diff.files.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn test_parse_hunkless_stanzas_between_text_files() {
+        let second = TEXT_STANZA.replace("src/lib.rs", "src/two.rs");
+        let diff = ParsedDiff::parse(&format!(
+            "{TEXT_STANZA}{RENAME_STANZA}{MODE_STANZA}{BINARY_STANZA}{second}"
+        ))
+        .unwrap();
+        let paths: Vec<_> = diff.files.iter().map(|f| f.new_path.as_str()).collect();
+        assert_eq!(paths, ["src/lib.rs", "src/two.rs"]);
+    }
+
+    #[test]
+    fn test_parse_rejects_text_stanza_without_hunk() {
+        let truncated =
+            "diff --git a/src/x.rs b/src/x.rs\nindex 1..2 100644\n--- a/src/x.rs\n+++ b/src/x.rs\n";
+        let err = ParsedDiff::parse(&format!("{TEXT_STANZA}{truncated}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("b/src/x.rs"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_empty_diff() {
+        assert!(ParsedDiff::parse("").unwrap().files.is_empty());
     }
 }
