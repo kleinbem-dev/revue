@@ -139,10 +139,9 @@ mod tests {
     #[test]
     fn resolves_relative_program_paths_only() {
         assert_eq!(resolve_program("claude"), PathBuf::from("claude"));
-        assert_eq!(
-            resolve_program("/usr/bin/claude"),
-            PathBuf::from("/usr/bin/claude")
-        );
+        // temp_dir() is absolute on every platform, unlike a literal "/usr/bin".
+        let abs = std::env::temp_dir().join("claude");
+        assert_eq!(resolve_program(abs.to_str().unwrap()), abs);
         let rel = resolve_program("./bin/claude");
         assert!(rel.is_absolute());
         assert!(rel.ends_with("bin/claude"));
