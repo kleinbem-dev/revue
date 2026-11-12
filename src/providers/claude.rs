@@ -1,7 +1,19 @@
-use super::Provider;
-use anyhow::{anyhow, Result};
+use super::{Provider, cli};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use tokio::process::Command;
+
+/// The review prompt carries untrusted PR content, so the CLI gets no tools, no MCP
+/// servers and no user settings (hooks): it can only answer in text.
+const ARGS: &[&str] = &[
+    "-p",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "project",
+    "--no-session-persistence",
+];
 
 pub struct ClaudeCliProvider {
     bin_path: String,
@@ -27,12 +39,12 @@ impl Provider for ClaudeCliProvider {
     }
 
     async fn complete(&self, prompt: &str) -> Result<String> {
-        let output = Command::new(&self.bin_path)
-            .arg("-p")
-            .arg(prompt)
-            .output()
-            .await
-            .map_err(|e| anyhow!("Failed to spawn claude CLI at '{}': {}", self.bin_path, e))?;
+        // Empty cwd: no project settings or CLAUDE.md. Prompt on stdin: no E2BIG.
+        let workdir = cli::EmptyDir::new("revue-claude")?;
+        let mut cmd = Command::new(cli::resolve_program(&self.bin_path));
+        cmd.args(ARGS).current_dir(workdir.path());
+        let what = format!("claude CLI at '{}'", self.bin_path);
+        let output = cli::run(cmd, Some(prompt), cli::cli_timeout(), &what).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -53,5 +65,21 @@ impl Provider for ClaudeCliProvider {
         }
 
         Ok(stdout)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ARGS;
+
+    #[test]
+    fn claude_runs_without_tools_mcp_or_user_settings() {
+        let at = |flag: &str| ARGS.iter().position(|a| *a == flag).expect(flag);
+        assert_eq!(ARGS[at("--tools") + 1], "");
+        assert_eq!(ARGS[at("--setting-sources") + 1], "project");
+        assert!(ARGS.contains(&"--strict-mcp-config"));
+        // The prompt goes on stdin, never into argv.
+        assert_eq!(ARGS[0], "-p");
+        assert_eq!(ARGS.iter().filter(|a| !a.starts_with('-')).count(), 2);
     }
 }
