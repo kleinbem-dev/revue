@@ -108,6 +108,7 @@ export const load: LayoutLoad = async ({ fetch, depends }) => {
 			const reviewsRes = await apiFetch('/api/reviews', { signal: AbortSignal.timeout(5000) }, fetch);
 			if (reviewsRes.status === 401 || reviewsRes.status === 403) {
 				authRequired = true;
+				cachedReviews = [];
 				return;
 			}
 			if (reviewsRes.ok) {

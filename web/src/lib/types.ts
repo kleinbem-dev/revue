@@ -68,6 +68,7 @@ export interface WizardConfig {
 }
 
 export interface SkillSummary {
+	id: string;
 	name: string;
 	description: string;
 	triggers: string[];

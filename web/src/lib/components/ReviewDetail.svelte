@@ -30,10 +30,19 @@
 
 	const findingsList = $derived(review?.findings ?? []);
 
+	const indexedFindings = $derived(
+		findingsList
+			.filter((f): f is Finding => Boolean(f))
+			.map((finding, index) => ({
+				finding,
+				findingKey: `${finding.file}:${finding.line}:${finding.title}:${index}`
+			}))
+	);
+
 	const filteredFindings = $derived(
 		filter === 'all'
-			? findingsList
-			: findingsList.filter((f) => f && severityBucket(f.severity) === filter)
+			? indexedFindings
+			: indexedFindings.filter(({ finding }) => severityBucket(finding.severity) === filter)
 	);
 
 	const criticalCount = $derived(
@@ -275,8 +284,7 @@ Please review this file, apply the recommended fix or architectural adjustment, 
 				{#if filteredFindings.length === 0}
 					<div class="empty-state">No findings matching this filter. Clean diff! ✨</div>
 				{:else}
-					{#each filteredFindings as finding, idx (`${finding.file}:${finding.line}:${finding.title}:${idx}`)}
-						{@const findingKey = `${finding.file}:${finding.line}:${finding.title}:${idx}`}
+					{#each filteredFindings as { finding, findingKey } (findingKey)}
 						{@const bucket = severityBucket(finding.severity)}
 						{@const isDismissed = Boolean(
 							localDismissed[findingKey] ||

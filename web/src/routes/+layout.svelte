@@ -63,11 +63,14 @@
 		});
 		if (!res.ok) {
 			let errMsg = `HTTP ${res.status}`;
-			try {
-				const body = await res.json();
-				errMsg = body.error || body.message || errMsg;
-			} catch {
-				errMsg = (await res.text()) || errMsg;
+			const raw = await res.text();
+			if (raw) {
+				try {
+					const body = JSON.parse(raw);
+					errMsg = body.error || body.message || raw;
+				} catch {
+					errMsg = raw;
+				}
 			}
 			throw new Error(errMsg);
 		}

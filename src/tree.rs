@@ -2,11 +2,34 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+const GIT_REPO_ENV_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+];
+
+fn isolated_tokio_git(repo_root: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(repo_root);
+    for var in GIT_REPO_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 /// Resolves the filesystem root of the given repository against current working directory or fleet roots.
 pub fn resolve_repo_root(repo_arg: &str) -> Option<PathBuf> {
-    // Reject path traversal components, git metadata, and disallowed hidden components (allow exact .github)
+    // Reject empty segments (including leading/trailing '/'), traversal, git metadata, and hidden dirs (except .github)
     if repo_arg.split('/').any(|seg| {
-        seg == ".." || seg == "." || seg == ".git" || (seg.starts_with('.') && seg != ".github")
+        seg.is_empty()
+            || seg == ".."
+            || seg == "."
+            || seg == ".git"
+            || (seg.starts_with('.') && seg != ".github")
     }) {
         return None;
     }
@@ -145,8 +168,7 @@ impl EphemeralTreeGuard {
         // Ensure the commit exists in the local git repository; fetch if absent
         let has_commit = match tokio::time::timeout(
             Duration::from_secs(10),
-            tokio::process::Command::new("git")
-                .current_dir(repo_root)
+            isolated_tokio_git(repo_root)
                 .args(["cat-file", "-e", head_sha])
                 .output(),
         )
@@ -157,9 +179,8 @@ impl EphemeralTreeGuard {
         };
 
         if !has_commit {
-            let mut fetch_cmd = tokio::process::Command::new("git");
+            let mut fetch_cmd = isolated_tokio_git(repo_root);
             fetch_cmd
-                .current_dir(repo_root)
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .env("GIT_ASKPASS", "");
 
@@ -186,8 +207,7 @@ impl EphemeralTreeGuard {
         // Verify that head_sha exists locally after fetch
         let has_commit_after = match tokio::time::timeout(
             Duration::from_secs(10),
-            tokio::process::Command::new("git")
-                .current_dir(repo_root)
+            isolated_tokio_git(repo_root)
                 .args(["cat-file", "-e", head_sha])
                 .output(),
         )
@@ -246,8 +266,7 @@ impl EphemeralTreeGuard {
 
         let extract_pipeline = async {
             // Isolate git from global/system smudge filters and disable symlink creation on checkout.
-            let read_status = tokio::process::Command::new("git")
-                .current_dir(repo_root)
+            let read_status = isolated_tokio_git(repo_root)
                 .env("GIT_INDEX_FILE", &temp_index)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -264,8 +283,7 @@ impl EphemeralTreeGuard {
             }
 
             let prefix_arg = format!("{}/", temp_dir.display());
-            let checkout_status = tokio::process::Command::new("git")
-                .current_dir(repo_root)
+            let checkout_status = isolated_tokio_git(repo_root)
                 .env("GIT_INDEX_FILE", &temp_index)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -342,6 +360,9 @@ mod tests {
         assert!(resolve_repo_root("foo/.hidden").is_none());
         assert!(resolve_repo_root("evil;rm -rf /").is_none());
         assert!(resolve_repo_root("evil$foo").is_none());
+        assert!(resolve_repo_root("/tmp/other-repo").is_none());
+        assert!(resolve_repo_root("owner//repo").is_none());
+        assert!(resolve_repo_root("").is_none());
 
         // Exact .github repository is permitted by validation
         // (will return None if not present in CWD/workspace root, but passes path validation)
@@ -365,10 +386,20 @@ mod tests {
         let repo_dir = base.join("demo-repo");
         std::fs::create_dir_all(repo_dir.join("src")).unwrap();
 
+        let isolated_git = || {
+            let mut cmd = StdCommand::new("git");
+            cmd.current_dir(&repo_dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            for var in GIT_REPO_ENV_VARS {
+                cmd.env_remove(var);
+            }
+            cmd
+        };
+
         let git = |args: &[&str]| {
-            let st = StdCommand::new("git")
+            let st = isolated_git()
                 .args(args)
-                .current_dir(&repo_dir)
                 .env("GIT_AUTHOR_NAME", "Test")
                 .env("GIT_AUTHOR_EMAIL", "test@example.com")
                 .env("GIT_COMMITTER_NAME", "Test")
@@ -401,11 +432,7 @@ mod tests {
         assert!(sym_test_dir.join("safe_link").exists());
         assert!(sym_test_dir.join("escape_link").symlink_metadata().is_err());
 
-        let head_out = StdCommand::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&repo_dir)
-            .output()
-            .unwrap();
+        let head_out = isolated_git().args(["rev-parse", "HEAD"]).output().unwrap();
         let sha = String::from_utf8(head_out.stdout)
             .unwrap()
             .trim()

@@ -2,9 +2,11 @@ import type { Attachment } from 'svelte/attachments';
 
 const API_KEY_STORAGE_KEY = 'revue-api-key';
 
+export const authEvents = new EventTarget();
+
 export function getStoredApiKey(): string {
-	if (typeof localStorage === 'undefined') return '';
 	try {
+		if (typeof localStorage === 'undefined') return '';
 		return localStorage.getItem(API_KEY_STORAGE_KEY)?.trim() ?? '';
 	} catch {
 		return '';
@@ -12,17 +14,19 @@ export function getStoredApiKey(): string {
 }
 
 export function setStoredApiKey(key: string): void {
-	if (typeof localStorage === 'undefined') return;
+	const trimmed = key.trim();
 	try {
-		const trimmed = key.trim();
-		if (trimmed) {
-			localStorage.setItem(API_KEY_STORAGE_KEY, trimmed);
-		} else {
-			localStorage.removeItem(API_KEY_STORAGE_KEY);
+		if (typeof localStorage !== 'undefined') {
+			if (trimmed) {
+				localStorage.setItem(API_KEY_STORAGE_KEY, trimmed);
+			} else {
+				localStorage.removeItem(API_KEY_STORAGE_KEY);
+			}
 		}
 	} catch {
 		// Ignore storage quota / privacy mode errors
 	}
+	authEvents.dispatchEvent(new Event('change'));
 }
 
 export function buildApiHeaders(extra?: HeadersInit, explicitKey?: string): Headers {

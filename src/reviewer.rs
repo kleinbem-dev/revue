@@ -1316,6 +1316,7 @@ pub async fn run_pr_review(
     let repo = repo_arg.ok_or_else(|| anyhow!("--repo is required for PR review"))?;
 
     let is_forgejo = is_forgejo_target(&config, repo);
+    let forge_type = config.forge.r#type.trim().to_ascii_lowercase();
 
     let forge: Box<dyn Forge> = if is_forgejo {
         let token = config
@@ -1324,7 +1325,7 @@ pub async fn run_pr_review(
             .clone()
             .or_else(|| std::env::var("FORGEJO_TOKEN").ok())
             .or_else(|| {
-                if config.forge.r#type == "forgejo" || config.forge.r#type == "gitea" {
+                if forge_type == "forgejo" || forge_type == "gitea" {
                     config.forge.token.clone()
                 } else {
                     None
@@ -1338,7 +1339,7 @@ pub async fn run_pr_review(
             .clone()
             .or_else(|| std::env::var("GITHUB_TOKEN").ok())
             .or_else(|| {
-                if config.forge.r#type == "github" {
+                if forge_type == "github" {
                     config.forge.token.clone()
                 } else {
                     None
@@ -2137,6 +2138,7 @@ And here is the JSON review output:
     #[test]
     fn test_is_forgejo_target_detection() {
         let mut cfg = RevueConfig::default();
+        cfg.forge.url.clear();
         assert!(!is_forgejo_target(&cfg, "owner/repo"));
         assert!(is_forgejo_target(&cfg, "git.example.com/owner/repo"));
 

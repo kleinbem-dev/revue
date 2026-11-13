@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildApiHeaders } from '../src/lib/api.ts';
+import { authEvents, buildApiHeaders, getStoredApiKey, setStoredApiKey } from '../src/lib/api.ts';
 import {
 	computeNoiseReductionPct,
 	generateRevueYaml,
@@ -80,4 +80,35 @@ test('buildApiHeaders attaches X-Revue-Key only when non-empty and absent', () =
 
 	const withoutKey = buildApiHeaders(undefined, '   ');
 	assert.equal(withoutKey.get('X-Revue-Key'), null);
+});
+
+test('storage helpers survive blocked localStorage getter and emit authEvents', () => {
+	const prevDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+	Object.defineProperty(globalThis, 'localStorage', {
+		configurable: true,
+		get() {
+			throw new Error('SecurityError: storage blocked');
+		}
+	});
+	try {
+		assert.equal(getStoredApiKey(), '');
+		let notified = 0;
+		const onAuth = () => {
+			notified += 1;
+		};
+		authEvents.addEventListener('change', onAuth);
+		try {
+			setStoredApiKey('token-1');
+			assert.equal(notified, 1);
+		} finally {
+			authEvents.removeEventListener('change', onAuth);
+		}
+	} finally {
+		if (prevDescriptor) {
+			Object.defineProperty(globalThis, 'localStorage', prevDescriptor);
+		} else {
+			// @ts-expect-error test cleanup
+			delete globalThis.localStorage;
+		}
+	}
 });

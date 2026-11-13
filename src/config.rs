@@ -303,6 +303,12 @@ impl RevueConfig {
         let mut cfg: RevueConfig = serde_saphyr::from_str(&content)
             .with_context(|| format!("Failed to parse YAML from {:?}", path))?;
 
+        if cfg.forge.url.trim().is_empty()
+            && let Ok(url) = std::env::var("FORGEJO_URL")
+        {
+            cfg.forge.url = url;
+        }
+
         if cfg.forge.github_token.is_none() {
             cfg.forge.github_token = std::env::var("GITHUB_TOKEN").ok();
         }
@@ -396,7 +402,7 @@ forge:
   # "forgejo", "gitea", "github", or "auto" (detected from git remote / forge.url)
   type: auto
   # Base URL when using a self-hosted Forgejo or Gitea instance (or set FORGEJO_URL)
-  url: ""
+  # url: "https://git.example.com"
   # Webhook HMAC secret for signature verification (or set REVUE_WEBHOOK_SECRET)
   # webhook_secret: "your-shared-secret"
 
@@ -475,7 +481,7 @@ mod tests {
         let config: RevueConfig =
             serde_saphyr::from_str(yaml).expect("Template should be valid YAML");
         assert_eq!(config.version, 1);
-        assert_eq!(config.forge.url, "");
+        assert_eq!(config.forge.url, default_forge_url());
         assert_eq!(config.providers.cascade.len(), 5);
         assert_eq!(config.providers.cascade[0], "antigravity");
         assert_eq!(config.providers.cascade[1], "mesh-llm");

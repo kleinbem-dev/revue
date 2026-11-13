@@ -81,10 +81,10 @@ impl ParsedDiff {
 
         let mut files = Vec::new();
         let mut pending = PendingFile::default();
-        let mut active_hunk: Option<(DiffHunk, u64)> = None;
+        let mut active_hunk: Option<(DiffHunk, u64, u64, u64)> = None;
 
-        let flush_hunk = |active: &mut Option<(DiffHunk, u64)>, pf: &mut PendingFile| {
-            if let Some((hunk, _)) = active.take() {
+        let flush_hunk = |active: &mut Option<(DiffHunk, u64, u64, u64)>, pf: &mut PendingFile| {
+            if let Some((hunk, _, _, _)) = active.take() {
                 pf.hunks.push(hunk);
             }
         };
@@ -100,7 +100,11 @@ impl ParsedDiff {
                 continue;
             }
 
-            if let Some(old_hdr) = line.strip_prefix("--- ")
+            let hunk_complete = active_hunk
+                .as_ref()
+                .is_none_or(|(_, _, rem_old, rem_new)| *rem_old == 0 && *rem_new == 0);
+            if hunk_complete
+                && let Some(old_hdr) = line.strip_prefix("--- ")
                 && lines
                     .get(idx + 1)
                     .is_some_and(|next| next.starts_with("+++ "))
@@ -133,23 +137,31 @@ impl ParsedDiff {
                         lines: Vec::new(),
                     },
                     new_start,
+                    old_lines,
+                    new_lines,
                 ));
                 idx += 1;
                 continue;
             }
 
-            if let Some((ref mut hunk, ref mut cur_new)) = active_hunk {
+            if let Some((ref mut hunk, ref mut cur_new, ref mut rem_old, ref mut rem_new)) =
+                active_hunk
+            {
                 if let Some(rest) = line.strip_prefix('+') {
                     pending.valid_lines.insert(*cur_new);
                     pending.added_lines.insert(*cur_new);
                     hunk.lines.push(format!("+{rest}"));
                     *cur_new += 1;
+                    *rem_new = rem_new.saturating_sub(1);
                 } else if let Some(rest) = line.strip_prefix('-') {
                     hunk.lines.push(format!("-{rest}"));
+                    *rem_old = rem_old.saturating_sub(1);
                 } else if let Some(rest) = line.strip_prefix(' ') {
                     pending.valid_lines.insert(*cur_new);
                     hunk.lines.push(format!(" {rest}"));
                     *cur_new += 1;
+                    *rem_old = rem_old.saturating_sub(1);
+                    *rem_new = rem_new.saturating_sub(1);
                 } else if line.starts_with('\\') {
                     // `\ No newline at end of file` carries metadata only and does not advance line numbers.
                 } else if line.is_empty() {
@@ -157,6 +169,8 @@ impl ParsedDiff {
                     pending.valid_lines.insert(*cur_new);
                     hunk.lines.push(" ".to_string());
                     *cur_new += 1;
+                    *rem_old = rem_old.saturating_sub(1);
+                    *rem_new = rem_new.saturating_sub(1);
                 } else {
                     bail!("Failed to parse unified diff: unexpected hunk line `{line}`");
                 }
@@ -477,15 +491,60 @@ fn parse_hunk_range(spec: &str) -> Option<(u64, u64)> {
 }
 
 fn parse_header_path(raw: &str) -> String {
-    let trimmed = raw.split('\t').next().unwrap_or(raw).trim();
-    if let Some(unquoted) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-        unquoted
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\")
-            .replace("\\t", "\t")
-    } else {
-        trimmed.to_string()
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        return unescape_git_quoted_path(rest);
     }
+    trimmed
+        .split('\t')
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
+}
+
+/// Decodes a Git C-quoted pathname (after the opening `"`) in a single pass, including octal UTF-8 bytes.
+fn unescape_git_quoted_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => break,
+            b'\\' if i + 1 < bytes.len() => {
+                i += 1;
+                match bytes[i] {
+                    b'0'..=b'7' => {
+                        let mut val = (bytes[i] - b'0') as u32;
+                        for _ in 0..2 {
+                            if i + 1 < bytes.len() && matches!(bytes[i + 1], b'0'..=b'7') {
+                                i += 1;
+                                val = val * 8 + (bytes[i] - b'0') as u32;
+                            } else {
+                                break;
+                            }
+                        }
+                        out.push((val & 0xff) as u8);
+                    }
+                    b'a' => out.push(0x07),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0c),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'v' => out.push(0x0b),
+                    b'\\' => out.push(b'\\'),
+                    b'"' => out.push(b'"'),
+                    other => out.push(other),
+                }
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Statistics summarizing token budgeting and file compression for review payloads.
@@ -636,7 +695,7 @@ mod tests {
 
     const SAMPLE_DIFF: &str = r#"--- a/src/main.rs
 +++ b/src/main.rs
-@@ -1,4 +1,5 @@
+@@ -1,3 +1,4 @@
  fn main() {
 -    println!("hello");
 +    let x = 42;
@@ -704,7 +763,7 @@ mod tests {
     fn test_format_with_budget_prioritization_and_truncation() {
         const MULTI_DIFF: &str = r#"--- a/docs/guide.md
 +++ b/docs/guide.md
-@@ -1,2 +1,3 @@
+@@ -1,1 +1,2 @@
  # Documentation
 +New documentation section.
 --- a/src/lib.rs
@@ -970,5 +1029,25 @@ rename to src/new name.rs
         let (formatted, _) = diff.format_with_budget(1_000);
         assert!(formatted.contains("[SURROUNDING FILE CONTEXT FOR src/ctx.rs"));
         assert!(formatted.contains("fn wrapper()"));
+    }
+
+    #[test]
+    fn test_hunk_lines_resembling_file_headers_and_git_quoted_octal_paths() {
+        let patch = concat!(
+            "diff --git \"a/src/caf\\303\\251\\\\tab.rs\" \"b/src/caf\\303\\251\\\\tab.rs\"\n",
+            "--- \"a/src/caf\\303\\251\\\\tab.rs\"\t2026-01-01 00:00:00 +0000\n",
+            "+++ \"b/src/caf\\303\\251\\\\tab.rs\"\t2026-01-01 00:00:00 +0000\n",
+            "@@ -1,3 +1,3 @@\n",
+            " fn start() {}\n",
+            "--- old sql comment\n",
+            "+++ new increment\n",
+            " fn end() {}\n",
+        );
+        let parsed = ParsedDiff::parse(patch).expect("Should parse hunk with --/+ lines");
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].new_path, "src/café\\tab.rs");
+        assert_eq!(parsed.files[0].hunks.len(), 1);
+        assert!(parsed.is_added_line("src/café\\tab.rs", 2));
+        assert!(parsed.is_valid_line("src/café\\tab.rs", 3));
     }
 }

@@ -1,4 +1,4 @@
-# WORKAROUND(sqlx): sqlx-sqlite 0.9.0 constrains `libsqlite3-sys < 0.38`, blocking the 0.39 bump in pure Cargo builds — remove when sqlx >= 0.9.1 relaxes `libsqlite3-sys` (upstream: launchbadge/sqlx#3851, tracking: kleinbem-dev/revue#46). Nix builds dynamically link system `pkgs.sqlite` (>= 3.54) and are unaffected.
+# WORKAROUND(sqlx): sqlx-sqlite 0.9.0 constrains `libsqlite3-sys < 0.38`, blocking the 0.39 bump in pure Cargo builds — remove when sqlx >= 0.9.1 relaxes `libsqlite3-sys` (upstream: transact-rs/sqlx#4516, tracking: kleinbem-dev/revue#46). Nix builds dynamically link system `pkgs.sqlite` (>= 3.54) and are unaffected.
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0459"
 ignoreUntil = 2027-02-09

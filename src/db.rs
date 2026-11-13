@@ -170,6 +170,15 @@ impl DbPool {
         .await
         .context("Failed to initialize SQLite schema")?;
 
+        // Backfill columns for databases created before `summary` and `findings_json` existed.
+        let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN summary TEXT NOT NULL DEFAULT '';")
+            .execute(pool)
+            .await;
+        let _ =
+            sqlx::query("ALTER TABLE reviews ADD COLUMN findings_json TEXT NOT NULL DEFAULT '[]';")
+                .execute(pool)
+                .await;
+
         Ok(())
     }
 
@@ -211,6 +220,19 @@ impl DbPool {
         .execute(pool)
         .await
         .context("Failed to initialize PostgreSQL schema")?;
+
+        sqlx::query(
+            "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '';",
+        )
+        .execute(pool)
+        .await
+        .context("Failed to migrate reviews.summary column")?;
+        sqlx::query(
+            "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS findings_json TEXT NOT NULL DEFAULT '[]';",
+        )
+        .execute(pool)
+        .await
+        .context("Failed to migrate reviews.findings_json column")?;
 
         Ok(())
     }
@@ -350,18 +372,36 @@ impl DbPool {
         })
     }
 
-    /// Maps `(repo, file_path, issue_title) -> feedback_type` so dashboard reloads retain dismissals.
-    pub async fn feedback_lookup(
+    /// Maps `(repo, file_path, issue_title) -> feedback_type` for `repos` so dashboard reloads retain dismissals.
+    pub async fn feedback_lookup_for_repos(
         &self,
-        limit: i64,
+        repos: &[String],
     ) -> Result<HashMap<(String, String, String), String>> {
-        let entries = self.list_all_feedback(limit).await?;
-        let mut map = HashMap::with_capacity(entries.len());
-        for entry in entries.into_iter().rev() {
-            map.insert(
-                (entry.repo, entry.file_path, entry.issue_title),
-                entry.feedback_type,
-            );
+        let mut seen_repos = std::collections::HashSet::new();
+        let mut map = HashMap::new();
+        let sql = r#"
+            SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+            FROM findings_feedback
+            WHERE repo = $1
+            ORDER BY id ASC
+        "#;
+
+        for repo in repos {
+            if !seen_repos.insert(repo.as_str()) {
+                continue;
+            }
+            let entries: Vec<FindingFeedback> = dispatch_pool!(self, pool => {
+                sqlx::query_as::<_, FindingFeedback>(sql)
+                    .bind(repo)
+                    .fetch_all(pool)
+                    .await?
+            });
+            for entry in entries {
+                map.insert(
+                    (entry.repo, entry.file_path, entry.issue_title),
+                    entry.feedback_type,
+                );
+            }
         }
         Ok(map)
     }
@@ -455,7 +495,10 @@ mod tests {
             Some("Intentionally read-only in nspawn containers")
         );
 
-        let lookup = db.feedback_lookup(50).await.unwrap();
+        let lookup = db
+            .feedback_lookup_for_repos(&["kleinbem/nix-config".to_string()])
+            .await
+            .unwrap();
         assert_eq!(
             lookup
                 .get(&(
@@ -466,5 +509,60 @@ mod tests {
                 .map(String::as_str),
             Some("false_positive")
         );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_legacy_reviews_migration() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                status TEXT NOT NULL,
+                provider_used TEXT NOT NULL,
+                pass1_candidates INTEGER NOT NULL DEFAULT 0,
+                pass2_filtered INTEGER NOT NULL DEFAULT 0,
+                verified_findings INTEGER NOT NULL DEFAULT 0,
+                cost_saved_usd REAL NOT NULL DEFAULT 0.0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        DbPool::init_sqlite(&pool).await.unwrap();
+        let db = DbPool::Sqlite(pool);
+        let id = db
+            .record_review(&NewReviewRecord {
+                repo: "owner/legacy",
+                pr_number: 1,
+                title: "legacy db test",
+                author: "dev",
+                status: "completed",
+                provider_used: "mock",
+                pass1: 1,
+                pass2: 1,
+                verified: 1,
+                cost_saved: 0.0,
+                duration_ms: 10,
+                summary: "migrated",
+                findings_json: "[]",
+            })
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let recent = db.list_recent_reviews(5).await.unwrap();
+        assert_eq!(recent[0].summary, "migrated");
     }
 }

@@ -13,7 +13,7 @@ use axum::{
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -118,6 +118,13 @@ pub struct DeleteFeedbackRequest {
     pub id: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PendingFollowUp {
+    pub rerun: bool,
+    pub publish: bool,
+    pub source: &'static str,
+}
+
 #[derive(Clone)]
 pub struct ServerState {
     pub config_path: Option<String>,
@@ -129,7 +136,7 @@ pub struct ServerState {
     pub reviews: Arc<RwLock<Vec<ReviewRecord>>>,
     pub manual_review_seq: Arc<AtomicU64>,
     pub review_semaphore: Arc<Semaphore>,
-    pub in_flight_reviews: Arc<Mutex<HashSet<(String, u64)>>>,
+    pub in_flight_reviews: Arc<Mutex<HashMap<(String, u64), PendingFollowUp>>>,
 }
 
 impl ServerState {
@@ -150,28 +157,48 @@ impl ServerState {
             reviews: Arc::new(RwLock::new(Vec::new())),
             manual_review_seq: Arc::new(AtomicU64::new(1)),
             review_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEWS)),
-            in_flight_reviews: Arc::new(Mutex::new(HashSet::new())),
+            in_flight_reviews: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 struct InFlightGuard {
-    set: Arc<Mutex<HashSet<(String, u64)>>>,
-    key: (String, u64),
+    map: Arc<Mutex<HashMap<(String, u64), PendingFollowUp>>>,
+    key: Option<(String, u64)>,
+}
+
+impl InFlightGuard {
+    fn disarm(&mut self) {
+        self.key = None;
+    }
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.set.try_lock() {
-            guard.remove(&self.key);
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        if let Ok(mut guard) = self.map.try_lock() {
+            guard.remove(&key);
         } else {
-            let set = self.set.clone();
-            let key = self.key.clone();
+            let map = self.map.clone();
             tokio::spawn(async move {
-                set.lock().await.remove(&key);
+                map.lock().await.remove(&key);
             });
         }
     }
+}
+
+fn cap_terminal_reviews(reviews: &mut Vec<ReviewRecord>, max_terminal: usize) {
+    let mut terminal_seen = 0usize;
+    reviews.retain(|r| {
+        if r.status == "running" {
+            true
+        } else {
+            terminal_seen += 1;
+            terminal_seen <= max_terminal
+        }
+    });
 }
 
 fn validate_repo_slug(raw: &str) -> Result<&str, &'static str> {
@@ -490,7 +517,6 @@ async fn get_reviews(
     };
 
     let cfg = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
-    let feedback_map = db.feedback_lookup(200).await.unwrap_or_default();
 
     let mut records: Vec<ReviewRecord> = Vec::new();
     let running_records: Vec<ReviewRecord> = {
@@ -504,6 +530,11 @@ async fn get_reviews(
     records.extend(running_records.iter().cloned());
 
     if let Ok(db_reviews) = db.list_recent_reviews(50).await {
+        let repos: Vec<String> = db_reviews.iter().map(|r| r.repo.clone()).collect();
+        let feedback_map = db
+            .feedback_lookup_for_repos(&repos)
+            .await
+            .unwrap_or_default();
         for r in db_reviews {
             if running_records
                 .iter()
@@ -778,7 +809,7 @@ async fn handle_synthesize_rule(
 }
 
 /// Enqueues a bounded, deduplicated background review task for `(repo, pr)`.
-/// Returns `false` if a review for the same `(repo, pr)` is already running.
+/// If `(repo, pr)` is already running, records a follow-up pass (coalescing `publish`) and returns `false`.
 async fn spawn_review_job(
     state: Arc<ServerState>,
     repo: String,
@@ -789,121 +820,129 @@ async fn spawn_review_job(
     let key = (repo.clone(), pr);
     {
         let mut active = state.in_flight_reviews.lock().await;
-        if !active.insert(key.clone()) {
+        if let Some(pending) = active.get_mut(&key) {
+            pending.rerun = true;
+            pending.publish |= publish;
+            pending.source = source;
             info!(
-                "Skipping duplicate {} review request for {} #{} (already running)",
-                source, repo, pr
+                "Coalescing follow-up {} review request for {} #{} (publish: {})",
+                source, repo, pr, pending.publish
             );
             return false;
         }
+        active.insert(key.clone(), PendingFollowUp::default());
     }
-    let guard = InFlightGuard {
-        set: state.in_flight_reviews.clone(),
-        key,
+    let mut guard = InFlightGuard {
+        map: state.in_flight_reviews.clone(),
+        key: Some(key.clone()),
     };
-
-    let cfg = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
-    let provider_hint = if cfg.providers.cascade.is_empty() {
-        "Cascade".to_string()
-    } else {
-        format!("Cascade ({})", cfg.providers.cascade.join(" → "))
-    };
-    let forge_kind = if is_forgejo_target(&cfg, &repo) {
-        "forgejo".to_string()
-    } else {
-        "github".to_string()
-    };
-
-    let seq = state.manual_review_seq.fetch_add(1, Ordering::Relaxed);
-    let clean_repo = repo.replace('/', "-");
-    let review_id = format!("rev-{}-{}-{}-{}", source, clean_repo, pr, seq);
-    let pending_review = ReviewRecord {
-        id: review_id.clone(),
-        repo: repo.clone(),
-        pr_number: pr,
-        title: Some(format!("PR #{}: Inspecting pull request changes", pr)),
-        status: "running".to_string(),
-        pass1_candidates: 0,
-        pass2_verified: 0,
-        duration_secs: 0,
-        provider_used: provider_hint,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        summary: if publish {
-            "Two-pass review executing (live publishing enabled).".to_string()
-        } else {
-            "Two-pass review executing (dry-run preview).".to_string()
-        },
-        forge: forge_kind,
-        findings: Vec::new(),
-    };
-
-    {
-        let mut reviews = state.reviews.write().await;
-        reviews.retain(|r| !(r.pr_number == pr && r.repo == repo && r.status == "running"));
-        reviews.insert(0, pending_review);
-        reviews.truncate(MAX_IN_MEMORY_REVIEWS);
-    }
 
     tokio::spawn(async move {
-        let _in_flight = guard;
-        let _permit = state.review_semaphore.clone().acquire_owned().await.ok();
-        let start = Instant::now();
-        let dry_run = !publish;
-        let result = run_pr_review(
-            pr,
-            Some(&repo),
-            dry_run,
-            state.config_path.as_deref(),
-            state.db.as_ref(),
-        )
-        .await;
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let mut cur_publish = publish;
+        let mut cur_source = source;
 
-        let mut reviews = state.reviews.write().await;
-        if let Some(r) = reviews.iter_mut().find(|r| r.id == review_id) {
+        loop {
+            let cfg = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
+            let provider_hint = if cfg.providers.cascade.is_empty() {
+                "Cascade".to_string()
+            } else {
+                format!("Cascade ({})", cfg.providers.cascade.join(" → "))
+            };
+            let forge_kind = if is_forgejo_target(&cfg, &repo) {
+                "forgejo".to_string()
+            } else {
+                "github".to_string()
+            };
+
+            let seq = state.manual_review_seq.fetch_add(1, Ordering::Relaxed);
+            let clean_repo = repo.replace('/', "-");
+            let review_id = format!("rev-{}-{}-{}-{}", cur_source, clean_repo, pr, seq);
+            let pending_review = ReviewRecord {
+                id: review_id.clone(),
+                repo: repo.clone(),
+                pr_number: pr,
+                title: Some(format!("PR #{}: Inspecting pull request changes", pr)),
+                status: "running".to_string(),
+                pass1_candidates: 0,
+                pass2_verified: 0,
+                duration_secs: 0,
+                provider_used: provider_hint,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                summary: if cur_publish {
+                    "Two-pass review executing (live publishing enabled).".to_string()
+                } else {
+                    "Two-pass review executing (dry-run preview).".to_string()
+                },
+                forge: forge_kind,
+                findings: Vec::new(),
+            };
+
+            {
+                let mut reviews = state.reviews.write().await;
+                reviews.retain(|r| !(r.pr_number == pr && r.repo == repo && r.status == "running"));
+                reviews.insert(0, pending_review);
+                cap_terminal_reviews(&mut reviews, MAX_IN_MEMORY_REVIEWS);
+            }
+
+            let result = {
+                let _permit = state.review_semaphore.clone().acquire_owned().await.ok();
+                let start = Instant::now();
+                let res = run_pr_review(
+                    pr,
+                    Some(&repo),
+                    !cur_publish,
+                    state.config_path.as_deref(),
+                    state.db.as_ref(),
+                )
+                .await;
+                (res, start.elapsed().as_millis() as u64)
+            };
+
             match result {
-                Ok(res) => {
-                    r.status = "completed".to_string();
-                    r.duration_secs = (res.duration_ms / 1000).max(1);
-                    r.pass1_candidates = res.pass1_candidates as u32;
-                    r.pass2_verified = res.pass2_verified as u32;
-                    r.provider_used = res.provider_used;
-                    r.title = Some(format!("PR #{}: Review analysis completed", pr));
-                    r.summary = res.summary;
-                    r.findings = res
-                        .issues
-                        .iter()
-                        .map(|issue| Finding {
-                            file: issue.file.clone(),
-                            line: issue.line,
-                            severity: issue.severity.clone(),
-                            title: issue.title.clone(),
-                            body: issue.comment.clone(),
-                            snippet: issue.suggestion.clone(),
-                            confidence: issue.confidence,
-                            feedback: None,
-                        })
-                        .collect();
+                (Ok(res), _) => {
+                    let mut reviews = state.reviews.write().await;
+                    if let Some(r) = reviews.iter_mut().find(|r| r.id == review_id) {
+                        r.status = "completed".to_string();
+                        r.duration_secs = (res.duration_ms / 1000).max(1);
+                        r.pass1_candidates = res.pass1_candidates as u32;
+                        r.pass2_verified = res.pass2_verified as u32;
+                        r.provider_used = res.provider_used;
+                        r.title = Some(format!("PR #{}: Review analysis completed", pr));
+                        r.summary = res.summary;
+                        r.findings = res
+                            .issues
+                            .iter()
+                            .map(|issue| Finding {
+                                file: issue.file.clone(),
+                                line: issue.line,
+                                severity: issue.severity.clone(),
+                                title: issue.title.clone(),
+                                body: issue.comment.clone(),
+                                snippet: issue.suggestion.clone(),
+                                confidence: issue.confidence,
+                                feedback: None,
+                            })
+                            .collect();
+                    }
+                    cap_terminal_reviews(&mut reviews, MAX_IN_MEMORY_REVIEWS);
                     info!(
                         "{} review completed for {} #{} (published: {}, findings: {})",
-                        source,
+                        cur_source,
                         repo,
                         pr,
-                        publish,
-                        r.findings.len()
+                        cur_publish,
+                        res.issues.len()
                     );
                 }
-                Err(e) => {
-                    r.status = "failed".to_string();
-                    r.duration_secs = (duration_ms / 1000).max(1);
-                    r.title = Some(format!("PR #{}: Review failed", pr));
-                    r.summary = format!("Review pipeline failed: {}", e);
-                    error!("{} review failed for {} #{}: {:?}", source, repo, pr, e);
+                (Err(e), duration_ms) => {
+                    let fail_title = format!("PR #{}: Review failed", pr);
+                    let fail_summary = format!("Review pipeline failed: {}", e);
+                    error!("{} review failed for {} #{}: {:?}", cur_source, repo, pr, e);
                     if let Some(db) = &state.db {
                         let rec = crate::db::NewReviewRecord {
                             repo: &repo,
                             pr_number: pr as i64,
-                            title: &format!("PR #{}: Review failed", pr),
+                            title: &fail_title,
                             author: "unknown",
                             status: "failed",
                             provider_used: "error",
@@ -912,13 +951,38 @@ async fn spawn_review_job(
                             verified: 0,
                             cost_saved: 0.0,
                             duration_ms: duration_ms as i64,
-                            summary: &format!("Review pipeline failed: {}", e),
+                            summary: &fail_summary,
                             findings_json: "[]",
                         };
                         let _ = db.record_review(&rec).await;
                     }
+                    let mut reviews = state.reviews.write().await;
+                    if let Some(r) = reviews.iter_mut().find(|r| r.id == review_id) {
+                        r.status = "failed".to_string();
+                        r.duration_secs = (duration_ms / 1000).max(1);
+                        r.title = Some(fail_title);
+                        r.summary = fail_summary;
+                    }
+                    cap_terminal_reviews(&mut reviews, MAX_IN_MEMORY_REVIEWS);
                 }
             }
+
+            let mut active = state.in_flight_reviews.lock().await;
+            if let Some(pending) = active.get_mut(&key)
+                && pending.rerun
+            {
+                cur_publish = pending.publish;
+                cur_source = if pending.source.is_empty() {
+                    cur_source
+                } else {
+                    pending.source
+                };
+                *pending = PendingFollowUp::default();
+                continue;
+            }
+            active.remove(&key);
+            guard.disarm();
+            break;
         }
     });
 
@@ -1745,5 +1809,33 @@ mod tests {
         assert!(list_after_resp["feedback"].as_array().unwrap().is_empty());
 
         server_task.abort();
+    }
+
+    #[test]
+    fn test_cap_terminal_reviews_retains_running_records() {
+        let mk = |id: &str, status: &str| ReviewRecord {
+            id: id.to_string(),
+            repo: "owner/repo".to_string(),
+            pr_number: 1,
+            title: None,
+            status: status.to_string(),
+            pass1_candidates: 0,
+            pass2_verified: 0,
+            duration_secs: 0,
+            provider_used: "mock".to_string(),
+            created_at: String::new(),
+            summary: String::new(),
+            forge: "github".to_string(),
+            findings: Vec::new(),
+        };
+        let mut reviews = vec![
+            mk("t1", "completed"),
+            mk("t2", "failed"),
+            mk("t3", "completed"),
+            mk("run-oldest", "running"),
+        ];
+        cap_terminal_reviews(&mut reviews, 2);
+        let ids: Vec<&str> = reviews.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["t1", "t2", "run-oldest"]);
     }
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { apiFetch, type SkillSummary, type FeedbackRecord } from '#lib';
+	import { apiFetch, authEvents, type SkillSummary, type FeedbackRecord } from '#lib';
 
 	let activeSection = $state<'memory' | 'skills'>('memory');
 	let feedbackList = $state<FeedbackRecord[]>([]);
@@ -13,8 +13,14 @@
 	let deletingId = $state<number | null>(null);
 
 	onMount(() => {
-		loadFeedback();
-		loadSkills();
+		const refresh = () => {
+			errorMessage = null;
+			loadFeedback();
+			loadSkills();
+		};
+		refresh();
+		authEvents.addEventListener('change', refresh);
+		return () => authEvents.removeEventListener('change', refresh);
 	});
 
 	async function loadFeedback() {
@@ -230,7 +236,7 @@
 				<div class="empty-skills">No skills matching "{skillSearch}".</div>
 			{:else}
 				<div class="skills-grid">
-					{#each filteredSkills as skill (skill.name)}
+					{#each filteredSkills as skill (skill.id)}
 						<div class="skill-card">
 							<div class="skill-card-top">
 								<span class="skill-name">{skill.name}</span>

@@ -206,12 +206,29 @@ in
           );
         };
       }
-      # Persist DynamicUser state when the host uses impermanence on /var.
-      (lib.optionalAttrs (options.environment ? persistence) {
-        environment.persistence."${cfg.persistencePath}".directories = lib.optionals (cfg.user == null) [
-          "/var/lib/private/revue"
-        ];
-      })
+      # Persist state on impermanence hosts unless userHome sits on a dedicated persistent /home mount.
+      (lib.optionalAttrs (options.environment ? persistence) (
+        let
+          homeIsPersistentFs =
+            (userHome == "/home" || lib.hasPrefix "/home/" userHome)
+            && (config.fileSystems ? "/home")
+            && (config.fileSystems."/home".fsType or "") != "tmpfs";
+        in
+        {
+          environment.persistence."${cfg.persistencePath}".directories =
+            if cfg.user == null then
+              [ "/var/lib/private/revue" ]
+            else
+              lib.optionals (!homeIsPersistentFs) [
+                {
+                  directory = "${userHome}/.local/share/revue";
+                  inherit (cfg) user;
+                  group = userGroup;
+                  mode = "0750";
+                }
+              ];
+        }
+      ))
     ]
   );
 }

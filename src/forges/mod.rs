@@ -149,12 +149,9 @@ pub(crate) fn parse_comments_array(
                 .to_string();
             let (path, line) = if include_location {
                 let path = item.get("path").and_then(|p| p.as_str()).map(String::from);
-                let line = item
-                    .get("line")
-                    .or_else(|| item.get("position"))
-                    .or_else(|| item.get("original_line"))
-                    .or_else(|| item.get("original_position"))
-                    .and_then(|l| l.as_u64());
+                let line = ["line", "position", "original_line", "original_position"]
+                    .into_iter()
+                    .find_map(|key| item.get(key).and_then(|l| l.as_u64()));
                 (path, line)
             } else {
                 (None, None)
@@ -204,7 +201,7 @@ mod tests {
         assert!(meta.is_draft);
 
         let comments_json = serde_json::json!([
-            { "user": { "login": "bob" }, "path": "src/lib.rs", "position": 18, "body": "Check bounds" }
+            { "user": { "login": "bob" }, "path": "src/lib.rs", "line": null, "original_line": 18, "body": "Check bounds" }
         ]);
         let inline = parse_comments_array(&comments_json, true);
         assert_eq!(inline.len(), 1);

@@ -4,6 +4,7 @@ use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSummary {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub triggers: Vec<String>,
@@ -235,7 +236,13 @@ pub fn list_all_skills(skills_dir: Option<&Path>) -> Vec<SkillSummary> {
         if path.is_dir()
             && let Some(skill) = load_skill_from_dir(&path)
         {
+            let id = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&skill.name)
+                .to_string();
             skills.push(SkillSummary {
+                id,
                 name: skill.name,
                 description: skill.description,
                 triggers: skill.triggers,
@@ -243,7 +250,7 @@ pub fn list_all_skills(skills_dir: Option<&Path>) -> Vec<SkillSummary> {
         }
     }
 
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     skills
 }
 
