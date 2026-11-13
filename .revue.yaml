@@ -1,13 +1,13 @@
-# nix-revue configuration
+# Revue configuration
 # Schema version
 version: 1
 
 # Forge configuration
 forge:
-  # "forgejo", "gitea", "github", or "auto" (detected from git remote)
+  # "forgejo", "gitea", "github", or "auto" (detected from repository remote)
   type: auto
-  # Base URL for Forgejo (used when forge is self-hosted)
-  url: "https://git.kleinbem.dev"
+  # Base URL when using a self-hosted Forgejo or Gitea instance:
+  # url: "https://forgejo.example.com"
 
 # Multi-model provider cascade (primary -> fallback 1 -> fallback 2)
 providers:

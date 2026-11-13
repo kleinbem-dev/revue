@@ -1,5 +1,6 @@
-use anyhow::Result;
-use std::collections::HashSet;
+use anyhow::{Result, anyhow, bail};
+use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct ParsedDiff {
@@ -13,7 +14,6 @@ pub struct FilePatch {
     pub hunks: Vec<DiffHunk>,
     pub valid_lines: HashSet<u64>,
     pub added_lines: HashSet<u64>,
-    pub raw_patch: String,
     pub file_context: Option<String>,
 }
 
@@ -26,93 +26,180 @@ pub struct DiffHunk {
     pub lines: Vec<String>,
 }
 
-impl ParsedDiff {
-    /// Parse unified diff text (e.g. from `git diff` or Forgejo API)
-    pub fn parse(diff_text: &str) -> Result<Self> {
-        let text = keep_stanzas_with_hunks(diff_text)?;
-        if !text.lines().any(|l| l.starts_with("@@")) {
-            return Ok(Self { files: Vec::new() });
+#[derive(Default)]
+struct PendingFile {
+    old_header: Option<String>,
+    new_header: Option<String>,
+    raw_new_header: Option<String>,
+    hunks: Vec<DiffHunk>,
+    valid_lines: HashSet<u64>,
+    added_lines: HashSet<u64>,
+}
+
+impl PendingFile {
+    fn flush(&mut self, out: &mut Vec<FilePatch>) -> Result<()> {
+        let Some(new_raw) = self.new_header.take() else {
+            self.old_header = None;
+            self.raw_new_header = None;
+            self.hunks.clear();
+            self.valid_lines.clear();
+            self.added_lines.clear();
+            return Ok(());
+        };
+
+        if self.hunks.is_empty() {
+            let display = self.raw_new_header.take().unwrap_or(new_raw);
+            bail!("Incomplete diff: `{display}` has file headers but no hunk");
         }
-        // patch 0.7 asserts on input it can't consume; a review should fail, not panic.
-        // upstream: uniphil/patch-rs#24, uniphil/patch-rs#25
-        let patches = std::panic::catch_unwind(|| patch::Patch::from_multiple(&text))
-            .map_err(|_| anyhow::anyhow!("Failed to parse unified diff: parser panicked"))?
-            .map_err(|e| anyhow::anyhow!("Failed to parse unified diff: {}", e))?;
+
+        let old_clean = self.old_header.take().and_then(|p| {
+            let cleaned = clean_diff_path(&p);
+            (cleaned != "/dev/null").then_some(cleaned)
+        });
+        let new_path = clean_diff_path(&new_raw);
+
+        out.push(FilePatch {
+            old_path: old_clean,
+            new_path,
+            hunks: std::mem::take(&mut self.hunks),
+            valid_lines: std::mem::take(&mut self.valid_lines),
+            added_lines: std::mem::take(&mut self.added_lines),
+            file_context: None,
+        });
+        self.raw_new_header = None;
+        Ok(())
+    }
+}
+
+impl ParsedDiff {
+    /// Parses unified diff text (from `git diff`, `jj diff --git`, or Forge APIs) without panicking.
+    pub fn parse(diff_text: &str) -> Result<Self> {
+        let lines: Vec<&str> = diff_text
+            .lines()
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .collect();
 
         let mut files = Vec::new();
+        let mut pending = PendingFile::default();
+        let mut active_hunk: Option<(DiffHunk, u64, u64, u64)> = None;
 
-        for p in patches {
-            let new_path = clean_diff_path(&p.new.path);
-            let old_path = if p.old.path == "/dev/null" {
-                None
-            } else {
-                Some(clean_diff_path(&p.old.path))
-            };
+        let flush_hunk = |active: &mut Option<(DiffHunk, u64, u64, u64)>, pf: &mut PendingFile| {
+            if let Some((hunk, _, _, _)) = active.take() {
+                pf.hunks.push(hunk);
+            }
+        };
 
-            let mut valid_lines = HashSet::new();
-            let mut added_lines = HashSet::new();
-            let mut hunks = Vec::new();
+        let mut idx = 0;
+        while idx < lines.len() {
+            let line = lines[idx];
 
-            for h in &p.hunks {
-                let mut current_new_line = h.new_range.start;
-                let mut hunk_lines = Vec::new();
-
-                for line in &h.lines {
-                    match line {
-                        patch::Line::Add(content) => {
-                            valid_lines.insert(current_new_line);
-                            added_lines.insert(current_new_line);
-                            hunk_lines.push(format!("+{}", content));
-                            current_new_line += 1;
-                        }
-                        patch::Line::Remove(content) => {
-                            hunk_lines.push(format!("-{}", content));
-                        }
-                        patch::Line::Context(content) => {
-                            valid_lines.insert(current_new_line);
-                            hunk_lines.push(format!(" {}", content));
-                            current_new_line += 1;
-                        }
-                    }
-                }
-
-                hunks.push(DiffHunk {
-                    old_start: h.old_range.start,
-                    old_lines: h.old_range.count,
-                    new_start: h.new_range.start,
-                    new_lines: h.new_range.count,
-                    lines: hunk_lines,
-                });
+            if line.starts_with("diff --git ") {
+                flush_hunk(&mut active_hunk, &mut pending);
+                pending.flush(&mut files)?;
+                idx += 1;
+                continue;
             }
 
-            files.push(FilePatch {
-                old_path,
-                new_path,
-                hunks,
-                valid_lines,
-                added_lines,
-                raw_patch: format!("{:?}", p),
-                file_context: None,
-            });
+            let hunk_complete = active_hunk
+                .as_ref()
+                .is_none_or(|(_, _, rem_old, rem_new)| *rem_old == 0 && *rem_new == 0);
+            if hunk_complete
+                && let Some(old_hdr) = line.strip_prefix("--- ")
+                && lines
+                    .get(idx + 1)
+                    .is_some_and(|next| next.starts_with("+++ "))
+            {
+                flush_hunk(&mut active_hunk, &mut pending);
+                pending.flush(&mut files)?;
+                let raw_new = lines[idx + 1]
+                    .strip_prefix("+++ ")
+                    .unwrap_or_default()
+                    .trim();
+                pending.old_header = Some(parse_header_path(old_hdr));
+                pending.new_header = Some(parse_header_path(raw_new));
+                pending.raw_new_header = Some(raw_new.to_string());
+                idx += 2;
+                continue;
+            }
+
+            if line.starts_with("@@") {
+                if pending.new_header.is_none() {
+                    bail!("Failed to parse unified diff: hunk header without file header");
+                }
+                flush_hunk(&mut active_hunk, &mut pending);
+                let (old_start, old_lines, new_start, new_lines) = parse_hunk_header(line)?;
+                active_hunk = Some((
+                    DiffHunk {
+                        old_start,
+                        old_lines,
+                        new_start,
+                        new_lines,
+                        lines: Vec::new(),
+                    },
+                    new_start,
+                    old_lines,
+                    new_lines,
+                ));
+                idx += 1;
+                continue;
+            }
+
+            if let Some((ref mut hunk, ref mut cur_new, ref mut rem_old, ref mut rem_new)) =
+                active_hunk
+            {
+                if let Some(rest) = line.strip_prefix('+') {
+                    pending.valid_lines.insert(*cur_new);
+                    pending.added_lines.insert(*cur_new);
+                    hunk.lines.push(format!("+{rest}"));
+                    *cur_new += 1;
+                    *rem_new = rem_new.saturating_sub(1);
+                } else if let Some(rest) = line.strip_prefix('-') {
+                    hunk.lines.push(format!("-{rest}"));
+                    *rem_old = rem_old.saturating_sub(1);
+                } else if let Some(rest) = line.strip_prefix(' ') {
+                    pending.valid_lines.insert(*cur_new);
+                    hunk.lines.push(format!(" {rest}"));
+                    *cur_new += 1;
+                    *rem_old = rem_old.saturating_sub(1);
+                    *rem_new = rem_new.saturating_sub(1);
+                } else if line.starts_with('\\') {
+                    // `\ No newline at end of file` carries metadata only and does not advance line numbers.
+                } else if line.is_empty() {
+                    // Unprefixed blank context lines emitted by stripped editors.
+                    pending.valid_lines.insert(*cur_new);
+                    hunk.lines.push(" ".to_string());
+                    *cur_new += 1;
+                    *rem_old = rem_old.saturating_sub(1);
+                    *rem_new = rem_new.saturating_sub(1);
+                } else {
+                    bail!("Failed to parse unified diff: unexpected hunk line `{line}`");
+                }
+            }
+
+            idx += 1;
         }
+
+        flush_hunk(&mut active_hunk, &mut pending);
+        pending.flush(&mut files)?;
 
         Ok(Self { files })
     }
 
-    /// Filter files matching ignore glob patterns (like `**/flake.lock`)
+    /// Filter files matching ignore glob patterns (like `**/flake.lock`).
     pub fn apply_filters(&mut self, filters: &[String]) {
         if filters.is_empty() {
             return;
         }
 
         self.files.retain(|f| {
+            let path = effective_path(f);
             for pattern in filters {
                 let clean_pattern = pattern.strip_prefix('!').unwrap_or(pattern);
                 let glob_pattern = clean_glob(clean_pattern);
                 if let Ok(matcher) = glob::Pattern::new(&glob_pattern)
-                    && matcher.matches(&f.new_path)
+                    && matcher.matches(path)
                 {
-                    tracing::debug!("Ignoring filtered file: {}", f.new_path);
+                    tracing::debug!("Ignoring filtered file: {}", path);
                     return false;
                 }
             }
@@ -120,23 +207,25 @@ impl ParsedDiff {
         });
     }
 
-    /// Enrich diff with actual surrounding file context from disk (like CodeRabbit AST context)
-    pub fn enrich_with_disk_context(&mut self, root_dir: Option<&std::path::Path>) {
-        let base = root_dir.unwrap_or_else(|| std::path::Path::new("."));
+    /// Enrich diff with surrounding file context from disk.
+    pub fn enrich_with_disk_context(&mut self, root_dir: Option<&Path>) {
+        let base = root_dir.unwrap_or_else(|| Path::new("."));
         let canonical_base = base.canonicalize().ok();
 
         for f in &mut self.files {
+            if f.new_path == "/dev/null" {
+                continue;
+            }
             let file_path = base.join(&f.new_path);
             if let Some(ref root) = canonical_base {
-                if let Ok(canon) = file_path.canonicalize() {
-                    if !canon.starts_with(root) {
-                        tracing::warn!(
-                            "Rejecting disk context path escaping base directory: {:?}",
-                            file_path
-                        );
-                        continue;
-                    }
-                } else {
+                let Ok(canon) = file_path.canonicalize() else {
+                    continue;
+                };
+                if !canon.starts_with(root) {
+                    tracing::warn!(
+                        "Rejecting disk context path escaping base directory: {:?}",
+                        file_path
+                    );
                     continue;
                 }
             }
@@ -152,7 +241,7 @@ impl ParsedDiff {
                     }
                     f.file_context = Some(numbered);
                 } else {
-                    let mut included_lines = std::collections::BTreeSet::new();
+                    let mut included_lines = BTreeSet::new();
                     for h in &f.hunks {
                         let start = h.new_start.saturating_sub(40).max(1);
                         let end = (h.new_start + h.new_lines + 40).min(lines.len() as u64);
@@ -178,25 +267,23 @@ impl ParsedDiff {
         }
     }
 
-    /// Check if a proposed comment line is within the diff hunk additions/modifications
+    /// Check if a proposed comment line is within the diff hunk additions/context.
     pub fn is_valid_line(&self, file_path: &str, line: u64) -> bool {
         self.files
             .iter()
             .find(|f| f.new_path == file_path)
-            .map(|f| f.valid_lines.contains(&line))
-            .unwrap_or(false)
+            .is_some_and(|f| f.valid_lines.contains(&line))
     }
 
-    /// Check if a proposed line is strictly an added line in the diff
+    /// Check if a proposed line is strictly an added line in the diff.
     pub fn is_added_line(&self, file_path: &str, line: u64) -> bool {
         self.files
             .iter()
             .find(|f| f.new_path == file_path)
-            .map(|f| f.added_lines.contains(&line))
-            .unwrap_or(false)
+            .is_some_and(|f| f.added_lines.contains(&line))
     }
 
-    /// Find the first added line within a span [start, end]
+    /// Find the first added line within a span `[start, end]`.
     pub fn find_first_added_line_in_range(
         &self,
         file_path: &str,
@@ -209,18 +296,14 @@ impl ParsedDiff {
             .and_then(|f| (start..=end).find(|line| f.added_lines.contains(line)))
     }
 
-    /// Formats diff and surrounding file context under an estimated token budget.
-    /// Files are prioritized by semantic importance (source > tests/configs > docs).
-    /// Generated lockfiles and bundles are omitted with clear summaries.
+    /// Formats diff and surrounding file context under an estimated token budget (~4 chars/token).
     pub fn format_with_budget(&self, max_tokens: usize) -> (String, DiffBudgetStats) {
         let mut stats = DiffBudgetStats {
             total_files: self.files.len(),
             ..Default::default()
         };
 
-        // Standard token heuristic: ~4 characters per token; reject zero budget
-        assert!(max_tokens > 0, "max_tokens must be strictly greater than zero");
-        let max_chars = max_tokens.saturating_mul(4);
+        let max_chars = max_tokens.max(1).saturating_mul(4);
         let mut total_chars = 0;
         let mut out = String::new();
 
@@ -235,7 +318,6 @@ impl ParsedDiff {
             }
         }
 
-        // Emit concise summary for omitted generated lockfiles
         for generated in generated_files {
             stats.omitted_generated_files += 1;
             let note = format!(
@@ -246,7 +328,6 @@ impl ParsedDiff {
             out.push_str(&note);
         }
 
-        // Sort reviewable files by priority (1 = Core source, 2 = Tests/config, 3 = Docs)
         reviewable_files.sort_by_key(|f| {
             let p = effective_path(f);
             (classify_file_priority(p), p.to_string())
@@ -265,19 +346,19 @@ impl ParsedDiff {
             }
 
             let remaining_chars = max_chars.saturating_sub(total_chars);
+            let old_header = match f.old_path.as_deref() {
+                Some(old) => format!("a/{old}"),
+                None => "/dev/null".to_string(),
+            };
             let new_header = if f.new_path == "/dev/null" {
                 "/dev/null".to_string()
             } else {
                 format!("b/{}", f.new_path)
             };
             let file_header = format!(
-                "=== MODIFIED FILE: {} ===\n--- a/{}\n+++ {}\n",
-                path_display,
-                f.old_path.as_deref().unwrap_or(path_display),
-                new_header
+                "=== MODIFIED FILE: {path_display} ===\n--- {old_header}\n+++ {new_header}\n"
             );
 
-            // If we cannot even fit the file header, omit the file
             if file_header.len() > remaining_chars {
                 stats.omitted_budget_files += 1;
                 let (additions, deletions) = count_patch_lines(f);
@@ -295,7 +376,6 @@ impl ParsedDiff {
             let mut skipped_hunk_lines = 0;
             let mut done = false;
 
-            // Reserve space for truncation marker and final newline if we need to truncate
             const TRUNC_MARKER_EST: usize = 30;
             const FINAL_NEWLINE: usize = 1;
 
@@ -305,18 +385,26 @@ impl ParsedDiff {
                     h.old_start, h.old_lines, h.new_start, h.new_lines
                 );
 
-                if file_buf.len() + hunk_header.len() + TRUNC_MARKER_EST + FINAL_NEWLINE > remaining_chars {
+                if file_buf.len() + hunk_header.len() + TRUNC_MARKER_EST + FINAL_NEWLINE
+                    > remaining_chars
+                {
                     truncated_hunks = true;
-                    skipped_hunk_lines += f.hunks[hi..].iter().map(|x| x.lines.len()).sum::<usize>();
+                    skipped_hunk_lines +=
+                        f.hunks[hi..].iter().map(|x| x.lines.len()).sum::<usize>();
                     break;
                 }
                 file_buf.push_str(&hunk_header);
 
                 for (li, l) in h.lines.iter().enumerate() {
-                    if file_buf.len() + l.len() + 1 + TRUNC_MARKER_EST + FINAL_NEWLINE > remaining_chars {
+                    if file_buf.len() + l.len() + 1 + TRUNC_MARKER_EST + FINAL_NEWLINE
+                        > remaining_chars
+                    {
                         truncated_hunks = true;
                         skipped_hunk_lines += h.lines.len() - li;
-                        skipped_hunk_lines += f.hunks[hi + 1..].iter().map(|x| x.lines.len()).sum::<usize>();
+                        skipped_hunk_lines += f.hunks[hi + 1..]
+                            .iter()
+                            .map(|x| x.lines.len())
+                            .sum::<usize>();
                         done = true;
                         break;
                     }
@@ -347,7 +435,8 @@ impl ParsedDiff {
                     "\n[SURROUNDING FILE CONTEXT FOR {} (numbered lines)]:\n",
                     path_display
                 );
-                if file_buf.len() + ctx_header.len() + ctx.len() + FINAL_NEWLINE <= remaining_chars {
+                if file_buf.len() + ctx_header.len() + ctx.len() + FINAL_NEWLINE <= remaining_chars
+                {
                     file_buf.push_str(&ctx_header);
                     file_buf.push_str(ctx);
                     file_buf.push('\n');
@@ -367,6 +456,97 @@ impl ParsedDiff {
     }
 }
 
+/// Parses `@@ -old_start[,old_count] +new_start[,new_count] @@ [heading]`.
+fn parse_hunk_header(line: &str) -> Result<(u64, u64, u64, u64)> {
+    let inner = line
+        .strip_prefix("@@")
+        .and_then(|s| s.split("@@").next())
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("Malformed hunk header: `{line}`"))?;
+
+    let mut parts = inner.split_whitespace();
+    let old_spec = parts
+        .next()
+        .and_then(|s| s.strip_prefix('-'))
+        .ok_or_else(|| anyhow!("Malformed old range in hunk header: `{line}`"))?;
+    let new_spec = parts
+        .next()
+        .and_then(|s| s.strip_prefix('+'))
+        .ok_or_else(|| anyhow!("Malformed new range in hunk header: `{line}`"))?;
+
+    let (old_start, old_count) = parse_hunk_range(old_spec)
+        .ok_or_else(|| anyhow!("Invalid old line numbers in hunk header: `{line}`"))?;
+    let (new_start, new_count) = parse_hunk_range(new_spec)
+        .ok_or_else(|| anyhow!("Invalid new line numbers in hunk header: `{line}`"))?;
+
+    Ok((old_start, old_count, new_start, new_count))
+}
+
+fn parse_hunk_range(spec: &str) -> Option<(u64, u64)> {
+    if let Some((start_s, count_s)) = spec.split_once(',') {
+        Some((start_s.parse().ok()?, count_s.parse().ok()?))
+    } else {
+        Some((spec.parse().ok()?, 1))
+    }
+}
+
+fn parse_header_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        return unescape_git_quoted_path(rest);
+    }
+    trimmed
+        .split('\t')
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
+}
+
+/// Decodes a Git C-quoted pathname (after the opening `"`) in a single pass, including octal UTF-8 bytes.
+fn unescape_git_quoted_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => break,
+            b'\\' if i + 1 < bytes.len() => {
+                i += 1;
+                match bytes[i] {
+                    b'0'..=b'7' => {
+                        let mut val = (bytes[i] - b'0') as u32;
+                        for _ in 0..2 {
+                            if i + 1 < bytes.len() && matches!(bytes[i + 1], b'0'..=b'7') {
+                                i += 1;
+                                val = val * 8 + (bytes[i] - b'0') as u32;
+                            } else {
+                                break;
+                            }
+                        }
+                        out.push((val & 0xff) as u8);
+                    }
+                    b'a' => out.push(0x07),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0c),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'v' => out.push(0x0b),
+                    b'\\' => out.push(b'\\'),
+                    b'"' => out.push(b'"'),
+                    other => out.push(other),
+                }
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Statistics summarizing token budgeting and file compression for review payloads.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffBudgetStats {
@@ -382,7 +562,6 @@ pub fn is_likely_generated_or_lockfile(path: &str) -> bool {
     let lower = path.to_lowercase();
     let basename = lower.rsplit('/').next().unwrap_or(&lower);
 
-    // Common package/dependency lockfiles
     if matches!(
         basename,
         "cargo.lock"
@@ -400,7 +579,6 @@ pub fn is_likely_generated_or_lockfile(path: &str) -> bool {
         return true;
     }
 
-    // Minified files, sourcemaps, generated bundles
     if basename.ends_with(".min.js")
         || basename.ends_with(".min.css")
         || basename.ends_with(".map")
@@ -409,25 +587,18 @@ pub fn is_likely_generated_or_lockfile(path: &str) -> bool {
         return true;
     }
 
-    // Common vendor directories
-    if path.starts_with("vendor/")
+    path.starts_with("vendor/")
         || path.contains("/vendor/")
         || path.starts_with("node_modules/")
         || path.contains("/node_modules/")
-    {
-        return true;
-    }
-
-    false
 }
 
-/// Semantic review priority: 1 = core logic/source, 2 = tests & configuration, 3 = documentation & text.
+/// Semantic review priority: 1 = core logic/source, 2 = tests & configuration, 3 = documentation & assets.
 pub fn classify_file_priority(path: &str) -> u8 {
     let lower = path.to_lowercase();
     let ext = lower.rsplit('.').next().unwrap_or("");
-
-    // Test files and test directories (by path segment and prefix/suffix to avoid matching words like inspector or specification)
     let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+
     let in_test_dir = lower
         .split('/')
         .any(|seg| matches!(seg, "test" | "tests" | "spec" | "specs" | "__tests__"));
@@ -441,21 +612,42 @@ pub fn classify_file_priority(path: &str) -> u8 {
         return 2;
     }
 
-    // Config files
-    if matches!(ext, "toml" | "yaml" | "yml" | "json" | "env" | "ini" | "cfg") {
+    if matches!(
+        ext,
+        "toml" | "yaml" | "yml" | "json" | "env" | "ini" | "cfg"
+    ) {
         return 2;
     }
 
-    // Documentation, markdown, plain text, assets
-    if matches!(ext, "md" | "txt" | "rst" | "html" | "svg" | "png" | "jpg" | "jpeg" | "ico") {
+    if matches!(
+        ext,
+        "md" | "txt" | "rst" | "html" | "svg" | "png" | "jpg" | "jpeg" | "ico"
+    ) {
         return 3;
     }
 
-    // Core executable source code
     if matches!(
         ext,
-        "rs" | "go" | "py" | "ts" | "js" | "svelte" | "c" | "cpp" | "h" | "hpp" | "zig" | "nix"
-            | "sh" | "bash" | "sql" | "java" | "kt" | "swift" | "rb" | "php" | "cs"
+        "rs" | "go"
+            | "py"
+            | "ts"
+            | "js"
+            | "svelte"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "zig"
+            | "nix"
+            | "sh"
+            | "bash"
+            | "sql"
+            | "java"
+            | "kt"
+            | "swift"
+            | "rb"
+            | "php"
+            | "cs"
     ) {
         return 1;
     }
@@ -463,8 +655,7 @@ pub fn classify_file_priority(path: &str) -> u8 {
     2
 }
 
-    /// Counts added and removed lines across all hunks in a patch.
-    fn count_patch_lines(f: &FilePatch) -> (usize, usize) {
+fn count_patch_lines(f: &FilePatch) -> (usize, usize) {
     let mut added = 0;
     let mut removed = 0;
     for h in &f.hunks {
@@ -479,43 +670,12 @@ pub fn classify_file_priority(path: &str) -> u8 {
     (added, removed)
 }
 
-/// Returns the review path, resolving `/dev/null` deleted files to their original `old_path`.
 fn effective_path(f: &FilePatch) -> &str {
     if f.new_path == "/dev/null" {
         f.old_path.as_deref().unwrap_or(&f.new_path)
     } else {
         &f.new_path
     }
-}
-
-/// Drops `diff --git` stanzas without a hunk (binary files, pure renames, mode changes):
-/// the patch crate needs a hunk per file and panics on a trailing hunkless stanza.
-/// A stanza with `---`/`+++` headers but no hunk is a truncated diff and an error.
-fn keep_stanzas_with_hunks(diff_text: &str) -> Result<std::borrow::Cow<'_, str>> {
-    if !diff_text.lines().any(|l| l.starts_with("diff --git ")) {
-        return Ok(std::borrow::Cow::Borrowed(diff_text));
-    }
-    let mut kept = String::with_capacity(diff_text.len());
-    let mut stanzas = Vec::new();
-    let mut stanza = String::new();
-    for line in diff_text.split_inclusive('\n') {
-        if line.starts_with("diff --git ") && !stanza.is_empty() {
-            stanzas.push(std::mem::take(&mut stanza));
-        }
-        stanza.push_str(line);
-    }
-    stanzas.push(stanza);
-    for stanza in stanzas {
-        if stanza.lines().any(|l| l.starts_with("@@")) {
-            kept.push_str(&stanza);
-        } else if let Some(header) = stanza.lines().find(|l| l.starts_with("+++ ")) {
-            return Err(anyhow::anyhow!(
-                "Incomplete diff: `{}` has file headers but no hunk",
-                header.trim_start_matches("+++ ").trim()
-            ));
-        }
-    }
-    Ok(std::borrow::Cow::Owned(kept))
 }
 
 fn clean_diff_path(path: &str) -> String {
@@ -535,7 +695,7 @@ mod tests {
 
     const SAMPLE_DIFF: &str = r#"--- a/src/main.rs
 +++ b/src/main.rs
-@@ -1,4 +1,5 @@
+@@ -1,3 +1,4 @@
  fn main() {
 -    println!("hello");
 +    let x = 42;
@@ -555,49 +715,38 @@ mod tests {
 
         let main_file = &diff.files[0];
         assert_eq!(main_file.new_path, "src/main.rs");
-        // Lines 2 and 3 are additions
         assert!(diff.is_valid_line("src/main.rs", 2));
         assert!(diff.is_valid_line("src/main.rs", 3));
-        // Line 99 does not exist
+        assert!(diff.is_valid_line("src/main.rs", 1));
+        assert!(diff.is_valid_line("src/main.rs", 4));
         assert!(!diff.is_valid_line("src/main.rs", 99));
     }
 
     #[test]
     fn test_apply_filters() {
-        let mut diff = ParsedDiff::parse(SAMPLE_DIFF).expect("Diff parsing should succeed");
-        assert_eq!(diff.files.len(), 2);
-
-        let filters = vec!["**/flake.lock".to_string()];
-        diff.apply_filters(&filters);
-
+        let mut diff = ParsedDiff::parse(SAMPLE_DIFF).unwrap();
+        diff.apply_filters(&["**/flake.lock".to_string()]);
         assert_eq!(diff.files.len(), 1);
         assert_eq!(diff.files[0].new_path, "src/main.rs");
     }
 
     #[test]
     fn test_added_lines_vs_context_lines() {
-        let diff = ParsedDiff::parse(SAMPLE_DIFF).expect("Diff parsing should succeed");
-        // Line 1 is context line: valid in file, but not an added line
+        let diff = ParsedDiff::parse(SAMPLE_DIFF).unwrap();
         assert!(diff.is_valid_line("src/main.rs", 1));
         assert!(!diff.is_added_line("src/main.rs", 1));
-
-        // Line 2 and 3 are additions
         assert!(diff.is_added_line("src/main.rs", 2));
         assert!(diff.is_added_line("src/main.rs", 3));
-
-        // Range starting on context line 1 spans into addition on line 2
         assert_eq!(
             diff.find_first_added_line_in_range("src/main.rs", 1, 4),
             Some(2)
         );
-        // Range completely outside additions
         assert_eq!(
             diff.find_first_added_line_in_range("src/main.rs", 1, 1),
             None
         );
     }
 
-    /// Verifies that lockfiles are automatically suppressed from prompt diffs.
     #[test]
     fn test_format_with_budget_omits_generated_lockfiles() {
         let diff = ParsedDiff::parse(SAMPLE_DIFF).expect("Diff parsing should succeed");
@@ -610,12 +759,11 @@ mod tests {
         assert!(formatted.contains("=== MODIFIED FILE: src/main.rs ==="));
     }
 
-    /// Verifies priority-based inclusion when token budget is limited.
     #[test]
     fn test_format_with_budget_prioritization_and_truncation() {
         const MULTI_DIFF: &str = r#"--- a/docs/guide.md
 +++ b/docs/guide.md
-@@ -1,2 +1,3 @@
+@@ -1,1 +1,2 @@
  # Documentation
 +New documentation section.
 --- a/src/lib.rs
@@ -626,18 +774,15 @@ mod tests {
  }
 "#;
         let diff = ParsedDiff::parse(MULTI_DIFF).expect("Diff parsing should succeed");
-        // Limit budget strictly to ~25 tokens (~100 chars) so second file is omitted
         let (formatted, stats) = diff.format_with_budget(25);
 
         assert_eq!(stats.total_files, 2);
         assert_eq!(stats.included_files, 1);
         assert_eq!(stats.omitted_budget_files, 1);
-        // Core source code included first, documentation omitted due to budget
         assert!(formatted.contains("=== MODIFIED FILE: src/lib.rs ==="));
         assert!(formatted.contains("=== FILE OMITTED (EXCEEDS TOKEN BUDGET): docs/guide.md"));
     }
 
-    /// Verifies that a truncated file stays strictly within its character budget.
     #[test]
     fn test_format_with_budget_truncation_strictly_within_character_limit() {
         const SINGLE_DIFF: &str = r#"--- a/src/long.rs
@@ -650,7 +795,6 @@ mod tests {
 +line 5
 "#;
         let diff = ParsedDiff::parse(SINGLE_DIFF).expect("Diff parsing should succeed");
-        // 25 tokens = 100 character budget limit
         let (formatted, stats) = diff.format_with_budget(25);
         assert_eq!(stats.included_files, 1);
         assert!(
@@ -660,7 +804,6 @@ mod tests {
         );
     }
 
-    /// Verifies that a deleted non-lockfile emits direct +++ /dev/null header without 'b/' prefix.
     #[test]
     fn test_format_with_budget_deleted_file_unified_header() {
         const DELETED_SOURCE: &str = r#"--- a/src/old.rs
@@ -671,28 +814,21 @@ mod tests {
         let diff = ParsedDiff::parse(DELETED_SOURCE).expect("Diff parsing should succeed");
         let (formatted, stats) = diff.format_with_budget(24_000);
         assert_eq!(stats.included_files, 1);
-        assert!(
-            formatted.contains("+++ /dev/null\n"),
-            "must contain direct +++ /dev/null without b/ prefix"
-        );
+        assert!(formatted.contains("+++ /dev/null\n"));
         assert!(!formatted.contains("+++ b//dev/null"));
     }
 
-    /// Verifies that words containing substrings like 'test' or 'spec' do not falsely demote core source files.
     #[test]
     fn test_classify_file_priority_precision() {
-        // Core source files containing 'test' or 'spec' substrings must remain priority 1
         assert_eq!(classify_file_priority("src/inspector.rs"), 1);
         assert_eq!(classify_file_priority("src/latest.rs"), 1);
         assert_eq!(classify_file_priority("src/specification.rs"), 1);
 
-        // Actual test files and directories must receive priority 2
         assert_eq!(classify_file_priority("tests/eval_benchmark.rs"), 2);
         assert_eq!(classify_file_priority("src/worker_test.rs"), 2);
         assert_eq!(classify_file_priority("src/auth.spec.ts"), 2);
     }
 
-    /// Verifies that deleted lockfiles (where new_path is /dev/null) are properly identified and suppressed via old_path.
     #[test]
     fn test_format_with_budget_deleted_file_classification() {
         const DELETED_DIFF: &str = r#"--- a/Cargo.lock
@@ -710,24 +846,26 @@ mod tests {
         assert!(formatted.contains("=== FILE OMITTED (LOCKFILE / GENERATED): Cargo.lock ==="));
     }
 
-    /// Verifies that node_modules is only matched as a whole path segment.
     #[test]
     fn test_is_likely_generated_node_modules_segment() {
         assert!(is_likely_generated_or_lockfile("node_modules/pkg/index.js"));
-        assert!(is_likely_generated_or_lockfile("packages/web/node_modules/pkg/index.js"));
+        assert!(is_likely_generated_or_lockfile(
+            "packages/web/node_modules/pkg/index.js"
+        ));
         assert!(!is_likely_generated_or_lockfile("my_node_modules/file.rs"));
-        assert!(!is_likely_generated_or_lockfile("src/node_modules_helper.rs"));
+        assert!(!is_likely_generated_or_lockfile(
+            "src/node_modules_helper.rs"
+        ));
     }
 
-    /// Verifies that passing zero max_tokens immediately triggers an assertion failure.
     #[test]
-    #[should_panic(expected = "max_tokens must be strictly greater than zero")]
-    fn test_format_with_budget_zero_tokens_panics() {
+    fn test_format_with_budget_zero_tokens_clamps_safely() {
         let diff = ParsedDiff::parse("--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n").unwrap();
-        let _ = diff.format_with_budget(0);
+        let (_, stats) = diff.format_with_budget(0);
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.omitted_budget_files, 1);
     }
 
-    // git extended headers: stanzas with no hunk (binary, rename, mode change).
     const TEXT_STANZA: &str = "diff --git a/src/lib.rs b/src/lib.rs
 index 1111111..2222222 100644
 --- a/src/lib.rs
@@ -803,5 +941,113 @@ new mode 100755
     #[test]
     fn test_parse_empty_diff() {
         assert!(ParsedDiff::parse("").unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn test_parse_multi_hunk_and_no_newline_marker() {
+        const MULTI_HUNK: &str = "\
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,4 @@
+ fn first() {
++    let x = 1;
+ }
+-// old tail
+\\ No newline at end of file
++// new tail
+\\ No newline at end of file
+@@ -10,2 +11,3 @@
+ fn second() {
++    let y = 2;
+ }
+";
+        let diff = ParsedDiff::parse(MULTI_HUNK).unwrap();
+        assert_eq!(diff.files.len(), 1);
+        assert!(diff.is_valid_line("src/lib.rs", 1));
+        assert!(diff.is_added_line("src/lib.rs", 2));
+        assert!(diff.is_added_line("src/lib.rs", 4));
+        assert!(!diff.is_valid_line("src/lib.rs", 7));
+        assert!(diff.is_valid_line("src/lib.rs", 11));
+        assert!(diff.is_added_line("src/lib.rs", 12));
+        assert_eq!(
+            diff.find_first_added_line_in_range("src/lib.rs", 10, 13),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn test_parse_new_file_and_rename_with_edit() {
+        const NEW_AND_RENAMED: &str = "\
+diff --git a/dev/null b/src/created.rs
+new file mode 100644
+--- /dev/null
++++ b/src/created.rs
+@@ -0,0 +1,2 @@
++pub fn created() {}
++pub const VERSION: u32 = 1;
+diff --git \"a/src/old name.rs\" \"b/src/new name.rs\"
+similarity index 80%
+rename from src/old name.rs
+rename to src/new name.rs
+--- \"a/src/old name.rs\"\t2026-01-01 00:00:00 +0000
++++ \"b/src/new name.rs\"\t2026-01-01 00:00:00 +0000
+@@ -1,2 +1,2 @@
+-pub fn old_name() {}
++pub fn new_name() {}
+ pub fn shared() {}
+";
+        let diff = ParsedDiff::parse(NEW_AND_RENAMED).unwrap();
+        assert_eq!(diff.files.len(), 2);
+        assert_eq!(diff.files[0].old_path.as_deref(), None);
+        assert_eq!(diff.files[0].new_path, "src/created.rs");
+        assert!(diff.is_added_line("src/created.rs", 1));
+        assert!(diff.is_added_line("src/created.rs", 2));
+
+        assert_eq!(diff.files[1].old_path.as_deref(), Some("src/old name.rs"));
+        assert_eq!(diff.files[1].new_path, "src/new name.rs");
+        assert!(diff.is_added_line("src/new name.rs", 1));
+        assert!(!diff.is_added_line("src/new name.rs", 2));
+
+        let (formatted, stats) = diff.format_with_budget(10_000);
+        assert_eq!(stats.included_files, 2);
+        assert!(formatted.contains("--- /dev/null\n+++ b/src/created.rs\n"));
+        assert!(formatted.contains("--- a/src/old name.rs\n+++ b/src/new name.rs\n"));
+    }
+
+    #[test]
+    fn test_parse_malformed_hunk_header_errors_without_panic() {
+        let bad = "--- a/src/x.rs\n+++ b/src/x.rs\n@@ -not,a,number +1,2 @@\n+oops\n";
+        assert!(ParsedDiff::parse(bad).is_err());
+    }
+
+    #[test]
+    fn test_format_with_budget_includes_surrounding_context() {
+        let mut diff =
+            ParsedDiff::parse("--- a/src/ctx.rs\n+++ b/src/ctx.rs\n@@ -2 +2 @@\n-old\n+new\n")
+                .unwrap();
+        diff.files[0].file_context = Some("   1 | fn wrapper() {\n   2 |     old\n   3 | }".into());
+        let (formatted, _) = diff.format_with_budget(1_000);
+        assert!(formatted.contains("[SURROUNDING FILE CONTEXT FOR src/ctx.rs"));
+        assert!(formatted.contains("fn wrapper()"));
+    }
+
+    #[test]
+    fn test_hunk_lines_resembling_file_headers_and_git_quoted_octal_paths() {
+        let patch = concat!(
+            "diff --git \"a/src/caf\\303\\251\\\\tab.rs\" \"b/src/caf\\303\\251\\\\tab.rs\"\n",
+            "--- \"a/src/caf\\303\\251\\\\tab.rs\"\t2026-01-01 00:00:00 +0000\n",
+            "+++ \"b/src/caf\\303\\251\\\\tab.rs\"\t2026-01-01 00:00:00 +0000\n",
+            "@@ -1,3 +1,3 @@\n",
+            " fn start() {}\n",
+            "--- old sql comment\n",
+            "+++ new increment\n",
+            " fn end() {}\n",
+        );
+        let parsed = ParsedDiff::parse(patch).expect("Should parse hunk with --/+ lines");
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].new_path, "src/café\\tab.rs");
+        assert_eq!(parsed.files[0].hunks.len(), 1);
+        assert!(parsed.is_added_line("src/café\\tab.rs", 2));
+        assert!(parsed.is_valid_line("src/café\\tab.rs", 3));
     }
 }

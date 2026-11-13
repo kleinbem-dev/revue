@@ -1,5 +1,5 @@
 use crate::config::RevueConfig;
-use crate::reviewer::run_pr_review;
+use crate::reviewer::{is_forgejo_target, run_pr_review};
 use anyhow::Result;
 use axum::{
     Router,
@@ -13,18 +13,22 @@ use axum::{
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use subtle::ConstantTimeEq;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock, Semaphore};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
+
+const MAX_CONCURRENT_REVIEWS: usize = 4;
+const MAX_IN_MEMORY_REVIEWS: usize = 100;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Finding {
@@ -84,6 +88,8 @@ pub struct DaemonStatusResponse {
     pub version: String,
     pub engine: String,
     pub uptime_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forge_url: Option<String>,
     pub metrics: DaemonMetrics,
     pub providers: Vec<ProviderStatus>,
 }
@@ -112,6 +118,13 @@ pub struct DeleteFeedbackRequest {
     pub id: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PendingFollowUp {
+    pub rerun: bool,
+    pub publish: bool,
+    pub source: &'static str,
+}
+
 #[derive(Clone)]
 pub struct ServerState {
     pub config_path: Option<String>,
@@ -122,11 +135,93 @@ pub struct ServerState {
     pub db: Option<crate::db::DbPool>,
     pub reviews: Arc<RwLock<Vec<ReviewRecord>>>,
     pub manual_review_seq: Arc<AtomicU64>,
+    pub review_semaphore: Arc<Semaphore>,
+    pub in_flight_reviews: Arc<Mutex<HashMap<(String, u64), PendingFollowUp>>>,
 }
 
-/// Enforce API key authentication on mutating endpoints.
+impl ServerState {
+    pub fn new(
+        config_path: Option<String>,
+        webhook_secret: Option<String>,
+        api_key: Option<String>,
+        insecure_webhooks: bool,
+        db: Option<crate::db::DbPool>,
+    ) -> Self {
+        Self {
+            config_path,
+            webhook_secret,
+            api_key,
+            insecure_webhooks,
+            start_time: Instant::now(),
+            db,
+            reviews: Arc::new(RwLock::new(Vec::new())),
+            manual_review_seq: Arc::new(AtomicU64::new(1)),
+            review_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEWS)),
+            in_flight_reviews: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+struct InFlightGuard {
+    map: Arc<Mutex<HashMap<(String, u64), PendingFollowUp>>>,
+    key: Option<(String, u64)>,
+}
+
+impl InFlightGuard {
+    fn disarm(&mut self) {
+        self.key = None;
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        if let Ok(mut guard) = self.map.try_lock() {
+            guard.remove(&key);
+        } else {
+            let map = self.map.clone();
+            tokio::spawn(async move {
+                map.lock().await.remove(&key);
+            });
+        }
+    }
+}
+
+fn cap_terminal_reviews(reviews: &mut Vec<ReviewRecord>, max_terminal: usize) {
+    let mut terminal_seen = 0usize;
+    reviews.retain(|r| {
+        if r.status == "running" {
+            true
+        } else {
+            terminal_seen += 1;
+            terminal_seen <= max_terminal
+        }
+    });
+}
+
+fn validate_repo_slug(raw: &str) -> Result<&str, &'static str> {
+    let repo = raw.trim();
+    if repo.is_empty()
+        || repo.contains("..")
+        || repo.starts_with('/')
+        || repo.ends_with('/')
+        || repo.contains('\\')
+        || repo.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err("Invalid repository identifier");
+    }
+    let segments: Vec<&str> = repo.split('/').collect();
+    if !(2..=3).contains(&segments.len()) || segments.iter().any(|s| s.is_empty()) {
+        return Err("Repository must be in 'owner/repo' format");
+    }
+    Ok(repo)
+}
+
+/// Enforce API key authentication on protected `/api/*` endpoints.
 /// If `api_key` is set in state, require `Authorization: Bearer <key>` or `X-Revue-Key: <key>`.
-/// If `api_key` is not configured, permit loopback requests only (127.0.0.1, ::1); reject remote callers.
+/// If `api_key` is not configured, permit loopback requests only (`127.0.0.1`, `::1`); reject remote callers.
 pub fn check_api_auth(
     headers: &HeaderMap,
     state: &ServerState,
@@ -163,7 +258,6 @@ pub fn check_api_auth(
             )),
         }
     } else {
-        // No explicit API key: allow loopback clients (localhost / 127.0.0.1 / ::1).
         // A missing client IP fails closed to prevent unintended exposure behind misconfigured proxies.
         let is_loopback = client_ip.map(|ip| ip.is_loopback()).unwrap_or(false);
         if is_loopback {
@@ -192,7 +286,6 @@ pub fn verify_signature(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool 
         return false;
     };
 
-    // Strip "sha256=" prefix if present (GitHub style: sha256=<hex>, Forgejo style: <hex>)
     let hex_sig = raw_sig.strip_prefix("sha256=").unwrap_or(raw_sig).trim();
 
     let Ok(expected_sig) = hex::decode(hex_sig) else {
@@ -250,6 +343,15 @@ async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, "revue daemon is healthy\n")
 }
 
+async fn in_memory_metrics(state: &ServerState) -> (u64, u64, u64, u64, String) {
+    let reviews = state.reviews.read().await;
+    let total = reviews.len() as u64;
+    let p1: u64 = reviews.iter().map(|r| r.pass1_candidates as u64).sum();
+    let p2: u64 = reviews.iter().map(|r| r.pass2_verified as u64).sum();
+    let filt = p1.saturating_sub(p2);
+    (total, p1, p2, filt, "$0.00".to_string())
+}
+
 /// Returns daemon health, uptime, provider status, and aggregate review telemetry.
 async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let uptime_secs = state.start_time.elapsed().as_secs();
@@ -263,31 +365,20 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
 
     let (total_reviews, pass1, pass2, filtered, cost_saved_str) = if let Some(db) = &state.db {
         match db.get_metrics().await {
-            Ok(m) => {
-                let total = m.total_reviews as u64;
-                let p1 = m.pass1_candidates as u64;
-                let p2 = m.verified_findings as u64;
-                let filt = m.pass2_filtered as u64;
-                let cost = format!("${:.2}", m.total_cost_saved);
-                (total, p1, p2, filt, cost)
-            }
+            Ok(m) => (
+                m.total_reviews as u64,
+                m.pass1_candidates as u64,
+                m.verified_findings as u64,
+                m.pass2_filtered as u64,
+                format!("${:.2}", m.total_cost_saved),
+            ),
             Err(e) => {
                 warn!("Failed to query DB metrics: {}", e);
-                let reviews = state.reviews.read().await;
-                let total = reviews.len() as u64;
-                let p1: u64 = reviews.iter().map(|r| r.pass1_candidates as u64).sum();
-                let p2: u64 = reviews.iter().map(|r| r.pass2_verified as u64).sum();
-                let filt = p1.saturating_sub(p2);
-                (total, p1, p2, filt, "$0.00".to_string())
+                in_memory_metrics(&state).await
             }
         }
     } else {
-        let reviews = state.reviews.read().await;
-        let total = reviews.len() as u64;
-        let p1: u64 = reviews.iter().map(|r| r.pass1_candidates as u64).sum();
-        let p2: u64 = reviews.iter().map(|r| r.pass2_verified as u64).sum();
-        let filt = p1.saturating_sub(p2);
-        (total, p1, p2, filt, "$0.00".to_string())
+        in_memory_metrics(&state).await
     };
 
     let metrics = DaemonMetrics {
@@ -299,11 +390,10 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
         uptime: uptime_str,
     };
 
-    let cfg = crate::config::RevueConfig::find_and_load(state.config_path.as_deref())
-        .unwrap_or_else(|e| {
-            warn!("Failed to load config for provider status: {}", e);
-            Default::default()
-        });
+    let cfg = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_else(|e| {
+        warn!("Failed to load config for provider status: {}", e);
+        Default::default()
+    });
     let mut providers = Vec::new();
     for name in &cfg.providers.cascade {
         match name.as_str() {
@@ -357,9 +447,24 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
                 providers.push(ProviderStatus {
                     name: "Claude CLI".to_string(),
                     r#type: "cli".to_string(),
-                    model: "claude-3-7-sonnet".to_string(),
+                    model: "claude-sonnet".to_string(),
                     status: "configured".to_string(),
                     cost_per_token: "Shielded".to_string(),
+                    latency_avg: "—".to_string(),
+                });
+            }
+            "openai" | "openai-compat" => {
+                let has_key = std::env::var("OPENAI_API_KEY").is_ok();
+                providers.push(ProviderStatus {
+                    name: "OpenAI-Compatible API".to_string(),
+                    r#type: "api".to_string(),
+                    model: cfg.providers.openai_model.clone(),
+                    status: if has_key {
+                        "configured".to_string()
+                    } else {
+                        "unconfigured".to_string()
+                    },
+                    cost_per_token: "Pay-as-you-go".to_string(),
                     latency_avg: "—".to_string(),
                 });
             }
@@ -376,27 +481,44 @@ async fn get_status(State(state): State<Arc<ServerState>>) -> impl IntoResponse 
         }
     }
 
+    let forge_url = {
+        let trimmed = cfg.forge.url.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+
     Json(DaemonStatusResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         engine: "revue".to_string(),
         uptime_secs,
+        forge_url,
         metrics,
         providers,
     })
 }
 
 /// Returns the list of recent pull request reviews from database and in-memory states.
-async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
-    // If no DB is configured, return all in-memory records directly.
-    if state.db.is_none() {
-        let reviews = state.reviews.read().await;
-        return Json(reviews.clone());
+async fn get_reviews(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    if let Err((status, msg)) = check_api_auth(&headers, &state, Some(addr.ip())) {
+        return (status, msg).into_response();
     }
 
-    let mut records: Vec<ReviewRecord> = Vec::new();
+    let Some(db) = &state.db else {
+        let reviews = state.reviews.read().await;
+        return Json(reviews.clone()).into_response();
+    };
 
-    // 1. In-memory running reviews
+    let cfg = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
+
+    let mut records: Vec<ReviewRecord> = Vec::new();
     let running_records: Vec<ReviewRecord> = {
         let reviews = state.reviews.read().await;
         reviews
@@ -407,23 +529,35 @@ async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse
     };
     records.extend(running_records.iter().cloned());
 
-    // 2. Persistent reviews from DB
-    if let Some(db) = &state.db
-        && let Ok(db_reviews) = db.list_recent_reviews(50).await
-    {
+    if let Ok(db_reviews) = db.list_recent_reviews(50).await {
+        let repos: Vec<String> = db_reviews.iter().map(|r| r.repo.clone()).collect();
+        let feedback_map = db
+            .feedback_lookup_for_repos(&repos)
+            .await
+            .unwrap_or_default();
         for r in db_reviews {
-            // Skip DB record only if the same PR is actively running in-memory
             if running_records
                 .iter()
                 .any(|rec| rec.repo == r.repo && rec.pr_number == r.pr_number as u64)
             {
                 continue;
             }
-            let findings: Vec<Finding> =
+            let mut findings: Vec<Finding> =
                 serde_json::from_str(&r.findings_json).unwrap_or_else(|err| {
                     warn!("Failed to parse findings for review {}: {}", r.id, err);
                     Vec::new()
                 });
+            for finding in &mut findings {
+                if finding.feedback.is_none()
+                    && let Some(fb) = feedback_map.get(&(
+                        r.repo.clone(),
+                        finding.file.clone(),
+                        finding.title.clone(),
+                    ))
+                {
+                    finding.feedback = Some(fb.clone());
+                }
+            }
             records.push(ReviewRecord {
                 id: r.id.to_string(),
                 repo: r.repo.clone(),
@@ -436,7 +570,7 @@ async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse
                 provider_used: r.provider_used,
                 created_at: r.created_at,
                 summary: r.summary,
-                forge: if r.repo.contains("git.") {
+                forge: if is_forgejo_target(&cfg, &r.repo) {
                     "forgejo".to_string()
                 } else {
                     "github".to_string()
@@ -446,13 +580,12 @@ async fn get_reviews(State(state): State<Arc<ServerState>>) -> impl IntoResponse
         }
     }
 
-    // 3. Fall back to all in-memory state if no records were found
     if records.is_empty() {
         let reviews = state.reviews.read().await;
-        return Json(reviews.clone());
+        return Json(reviews.clone()).into_response();
     }
 
-    Json(records)
+    Json(records).into_response()
 }
 
 async fn record_finding_feedback(
@@ -461,8 +594,7 @@ async fn record_finding_feedback(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<FeedbackRequest>,
 ) -> Response {
-    let client_ip = Some(addr.ip());
-    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
+    if let Err((status, msg)) = check_api_auth(&headers, &state, Some(addr.ip())) {
         return (status, msg).into_response();
     }
 
@@ -471,7 +603,6 @@ async fn record_finding_feedback(
         req.feedback_type, req.repo, req.file_path, req.issue_title
     );
 
-    // 1. Record into persistent DB if available
     if let Some(db) = &state.db
         && let Err(e) = db
             .record_feedback(
@@ -494,7 +625,6 @@ async fn record_finding_feedback(
             .into_response();
     }
 
-    // 2. Update in-memory reviews state
     let mut reviews = state.reviews.write().await;
     for review in reviews.iter_mut() {
         if req.review_id.as_deref() == Some(&review.id) || review.repo == req.repo {
@@ -516,19 +646,32 @@ async fn record_finding_feedback(
         .into_response()
 }
 
-async fn get_all_feedback(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+async fn get_all_feedback(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    if let Err((status, msg)) = check_api_auth(&headers, &state, Some(addr.ip())) {
+        return (status, msg).into_response();
+    }
+
     if let Some(db) = &state.db {
         match db.list_all_feedback(100).await {
             Ok(feedback) => Json(serde_json::json!({
                 "status": "success",
                 "feedback": feedback
-            })),
+            }))
+            .into_response(),
             Err(e) => {
                 error!("Failed to query feedback: {:?}", e);
-                Json(serde_json::json!({
-                    "status": "error",
-                    "feedback": []
-                }))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "feedback": []
+                    })),
+                )
+                    .into_response()
             }
         }
     } else {
@@ -536,6 +679,7 @@ async fn get_all_feedback(State(state): State<Arc<ServerState>>) -> impl IntoRes
             "status": "success",
             "feedback": []
         }))
+        .into_response()
     }
 }
 
@@ -545,8 +689,7 @@ async fn delete_feedback_entry(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<DeleteFeedbackRequest>,
 ) -> Response {
-    let client_ip = Some(addr.ip());
-    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
+    if let Err((status, msg)) = check_api_auth(&headers, &state, Some(addr.ip())) {
         return (status, msg).into_response();
     }
 
@@ -581,13 +724,32 @@ async fn delete_feedback_entry(
     }
 }
 
-async fn get_available_skills() -> impl IntoResponse {
-    let skills_dir = crate::skills::find_skills_dir(None);
+async fn get_available_skills(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    if let Err((status, msg)) = check_api_auth(&headers, &state, Some(addr.ip())) {
+        return (status, msg).into_response();
+    }
+
+    let cfg = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
+    let skills_dir = crate::skills::find_skills_dir(cfg.review.skills_dir.as_deref());
     let skills = crate::skills::list_all_skills(skills_dir.as_deref());
+    let display_dir = skills_dir.as_ref().map(|dir| {
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+            && let Ok(rel) = dir.strip_prefix(&home)
+        {
+            return format!("~/{}", rel.display());
+        }
+        dir.display().to_string()
+    });
     Json(serde_json::json!({
-        "skills_dir": skills_dir,
+        "skills_dir": display_dir,
         "skills": skills
     }))
+    .into_response()
 }
 
 async fn handle_synthesize_rule(
@@ -596,18 +758,11 @@ async fn handle_synthesize_rule(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<crate::synthesizer::RuleSynthesizeRequest>,
 ) -> Response {
-    let client_ip = Some(addr.ip());
-    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
+    if let Err((status, msg)) = check_api_auth(&headers, &state, Some(addr.ip())) {
         return (status, msg).into_response();
     }
 
-    let repo_clean = req.repo.trim();
-    if repo_clean.is_empty()
-        || repo_clean.contains("..")
-        || repo_clean.starts_with('/')
-        || repo_clean.starts_with('\\')
-        || repo_clean.split('/').count() > 2
-    {
+    if validate_repo_slug(&req.repo).is_err() {
         return (
             StatusCode::BAD_REQUEST,
             Json(crate::synthesizer::RuleSynthesizeResponse {
@@ -643,8 +798,7 @@ async fn handle_synthesize_rule(
             .into_response();
     }
 
-    let config =
-        crate::config::RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
+    let config = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
     let chain = crate::reviewer::build_provider_chain(&config);
     let resp = crate::synthesizer::synthesize_rule(req, &chain).await;
     if resp.success {
@@ -654,124 +808,141 @@ async fn handle_synthesize_rule(
     }
 }
 
-/// Triggers an asynchronous code review for the specified pull request.
-async fn trigger_review(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(req): Json<TriggerRequest>,
-) -> Response {
-    let client_ip = Some(addr.ip());
-    if let Err((status, msg)) = check_api_auth(&headers, &state, client_ip) {
-        return (status, msg).into_response();
+/// Enqueues a bounded, deduplicated background review task for `(repo, pr)`.
+/// If `(repo, pr)` is already running, records a follow-up pass (coalescing `publish`) and returns `false`.
+async fn spawn_review_job(
+    state: Arc<ServerState>,
+    repo: String,
+    pr: u64,
+    publish: bool,
+    source: &'static str,
+) -> bool {
+    let key = (repo.clone(), pr);
+    {
+        let mut active = state.in_flight_reviews.lock().await;
+        if let Some(pending) = active.get_mut(&key) {
+            pending.rerun = true;
+            pending.publish |= publish;
+            pending.source = source;
+            info!(
+                "Coalescing follow-up {} review request for {} #{} (publish: {})",
+                source, repo, pr, pending.publish
+            );
+            return false;
+        }
+        active.insert(key.clone(), PendingFollowUp::default());
     }
-
-    let repo = req.repo.clone();
-    let pr = req.pr;
-
-    let publish = req.publish.unwrap_or(false);
-    info!(
-        "Received manual review trigger for {} #{} (publish: {})",
-        repo, pr, publish
-    );
-
-    let seq = state.manual_review_seq.fetch_add(1, Ordering::Relaxed);
-    let clean_repo = repo.replace('/', "-");
-    let review_id = format!("rev-manual-{}-{}-{}", clean_repo, pr, seq);
-    let pending_review = ReviewRecord {
-        id: review_id.clone(),
-        repo: repo.clone(),
-        pr_number: pr,
-        title: Some(format!("PR #{}: Inspecting pull request changes", pr)),
-        status: "running".to_string(),
-        pass1_candidates: 0,
-        pass2_verified: 0,
-        duration_secs: 0,
-        provider_used: "Cascade (Gemini 2.5 Pro → Mesh-LLM P2P)".to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        summary: if publish {
-            "Autonomous two-pass review executing (live publishing enabled): Pass 1 Detective broad discovery, Pass 2 Judge verification with direct forge commenting.".to_string()
-        } else {
-            "Autonomous two-pass review executing: Pass 1 Detective broad anomaly discovery, Pass 2 Judge verification with episodic brain constraints.".to_string()
-        },
-        forge: if repo.contains("git.") {
-            "forgejo".to_string()
-        } else {
-            "github".to_string()
-        },
-        findings: Vec::new(),
+    let mut guard = InFlightGuard {
+        map: state.in_flight_reviews.clone(),
+        key: Some(key.clone()),
     };
 
-    {
-        let mut reviews = state.reviews.write().await;
-        reviews.retain(|r| !(r.pr_number == pr && r.repo == repo && r.id == review_id));
-        reviews.insert(0, pending_review);
-    }
-
-    let config_path = state.config_path.clone();
-    let repo_clone = repo.clone();
-    let state_clone = state.clone();
-
     tokio::spawn(async move {
-        let start = std::time::Instant::now();
-        let dry_run = !publish;
-        let result = run_pr_review(
-            pr,
-            Some(&repo_clone),
-            dry_run,
-            config_path.as_deref(),
-            state_clone.db.as_ref(),
-        )
-        .await;
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let mut cur_publish = publish;
+        let mut cur_source = source;
 
-        let mut reviews = state_clone.reviews.write().await;
-        if let Some(r) = reviews.iter_mut().find(|r| r.id == review_id) {
+        loop {
+            let cfg = RevueConfig::find_and_load(state.config_path.as_deref()).unwrap_or_default();
+            let provider_hint = if cfg.providers.cascade.is_empty() {
+                "Cascade".to_string()
+            } else {
+                format!("Cascade ({})", cfg.providers.cascade.join(" → "))
+            };
+            let forge_kind = if is_forgejo_target(&cfg, &repo) {
+                "forgejo".to_string()
+            } else {
+                "github".to_string()
+            };
+
+            let seq = state.manual_review_seq.fetch_add(1, Ordering::Relaxed);
+            let clean_repo = repo.replace('/', "-");
+            let review_id = format!("rev-{}-{}-{}-{}", cur_source, clean_repo, pr, seq);
+            let pending_review = ReviewRecord {
+                id: review_id.clone(),
+                repo: repo.clone(),
+                pr_number: pr,
+                title: Some(format!("PR #{}: Inspecting pull request changes", pr)),
+                status: "running".to_string(),
+                pass1_candidates: 0,
+                pass2_verified: 0,
+                duration_secs: 0,
+                provider_used: provider_hint,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                summary: if cur_publish {
+                    "Two-pass review executing (live publishing enabled).".to_string()
+                } else {
+                    "Two-pass review executing (dry-run preview).".to_string()
+                },
+                forge: forge_kind,
+                findings: Vec::new(),
+            };
+
+            {
+                let mut reviews = state.reviews.write().await;
+                reviews.retain(|r| !(r.pr_number == pr && r.repo == repo && r.status == "running"));
+                reviews.insert(0, pending_review);
+                cap_terminal_reviews(&mut reviews, MAX_IN_MEMORY_REVIEWS);
+            }
+
+            let result = {
+                let _permit = state.review_semaphore.clone().acquire_owned().await.ok();
+                let start = Instant::now();
+                let res = run_pr_review(
+                    pr,
+                    Some(&repo),
+                    !cur_publish,
+                    state.config_path.as_deref(),
+                    state.db.as_ref(),
+                )
+                .await;
+                (res, start.elapsed().as_millis() as u64)
+            };
+
             match result {
-                Ok(res) => {
-                    r.status = "completed".to_string();
-                    r.duration_secs = (res.duration_ms / 1000).max(1);
-                    r.pass1_candidates = res.pass1_candidates as u32;
-                    r.pass2_verified = res.pass2_verified as u32;
-                    r.provider_used = res.provider_used;
-                    r.title = Some(format!("PR #{}: Review analysis completed", pr));
-                    r.summary = res.summary;
-                    r.findings = res
-                        .issues
-                        .iter()
-                        .map(|issue| Finding {
-                            file: issue.file.clone(),
-                            line: issue.line,
-                            severity: issue.severity.clone(),
-                            title: issue.title.clone(),
-                            body: issue.comment.clone(),
-                            snippet: issue.suggestion.clone(),
-                            confidence: issue.confidence,
-                            feedback: None,
-                        })
-                        .collect();
+                (Ok(res), _) => {
+                    let mut reviews = state.reviews.write().await;
+                    if let Some(r) = reviews.iter_mut().find(|r| r.id == review_id) {
+                        r.status = "completed".to_string();
+                        r.duration_secs = (res.duration_ms / 1000).max(1);
+                        r.pass1_candidates = res.pass1_candidates as u32;
+                        r.pass2_verified = res.pass2_verified as u32;
+                        r.provider_used = res.provider_used;
+                        r.title = Some(format!("PR #{}: Review analysis completed", pr));
+                        r.summary = res.summary;
+                        r.findings = res
+                            .issues
+                            .iter()
+                            .map(|issue| Finding {
+                                file: issue.file.clone(),
+                                line: issue.line,
+                                severity: issue.severity.clone(),
+                                title: issue.title.clone(),
+                                body: issue.comment.clone(),
+                                snippet: issue.suggestion.clone(),
+                                confidence: issue.confidence,
+                                feedback: None,
+                            })
+                            .collect();
+                    }
+                    cap_terminal_reviews(&mut reviews, MAX_IN_MEMORY_REVIEWS);
                     info!(
-                        "Manual review completed for {} #{} (published: {}, findings: {})",
-                        repo_clone,
+                        "{} review completed for {} #{} (published: {}, findings: {})",
+                        cur_source,
+                        repo,
                         pr,
-                        publish,
-                        r.findings.len()
+                        cur_publish,
+                        res.issues.len()
                     );
                 }
-                Err(e) => {
-                    r.status = "failed".to_string();
-                    r.duration_secs = (duration_ms / 1000).max(1);
-                    r.title = Some(format!("PR #{}: Review failed", pr));
-                    r.summary = format!("Review pipeline failed: {}", e);
-                    error!(
-                        "Manual review failed for {} #{}: {:?}",
-                        repo_clone, pr, e
-                    );
-                    if let Some(db) = &state_clone.db {
+                (Err(e), duration_ms) => {
+                    let fail_title = format!("PR #{}: Review failed", pr);
+                    let fail_summary = format!("Review pipeline failed: {}", e);
+                    error!("{} review failed for {} #{}: {:?}", cur_source, repo, pr, e);
+                    if let Some(db) = &state.db {
                         let rec = crate::db::NewReviewRecord {
-                            repo: &repo_clone,
+                            repo: &repo,
                             pr_number: pr as i64,
-                            title: &format!("PR #{}: Review failed", pr),
+                            title: &fail_title,
                             author: "unknown",
                             status: "failed",
                             provider_used: "error",
@@ -780,23 +951,100 @@ async fn trigger_review(
                             verified: 0,
                             cost_saved: 0.0,
                             duration_ms: duration_ms as i64,
-                            summary: &format!("Review pipeline failed: {}", e),
+                            summary: &fail_summary,
                             findings_json: "[]",
                         };
                         let _ = db.record_review(&rec).await;
                     }
+                    let mut reviews = state.reviews.write().await;
+                    if let Some(r) = reviews.iter_mut().find(|r| r.id == review_id) {
+                        r.status = "failed".to_string();
+                        r.duration_secs = (duration_ms / 1000).max(1);
+                        r.title = Some(fail_title);
+                        r.summary = fail_summary;
+                    }
+                    cap_terminal_reviews(&mut reviews, MAX_IN_MEMORY_REVIEWS);
                 }
             }
+
+            let mut active = state.in_flight_reviews.lock().await;
+            if let Some(pending) = active.get_mut(&key)
+                && pending.rerun
+            {
+                cur_publish = pending.publish;
+                cur_source = if pending.source.is_empty() {
+                    cur_source
+                } else {
+                    pending.source
+                };
+                *pending = PendingFollowUp::default();
+                continue;
+            }
+            active.remove(&key);
+            guard.disarm();
+            break;
         }
     });
+
+    true
+}
+
+/// Triggers an asynchronous code review for the specified pull request.
+async fn trigger_review(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<TriggerRequest>,
+) -> Response {
+    if let Err((status, msg)) = check_api_auth(&headers, &state, Some(addr.ip())) {
+        return (status, msg).into_response();
+    }
+
+    let repo = match validate_repo_slug(&req.repo) {
+        Ok(r) => r.to_string(),
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response();
+        }
+    };
+    if req.pr == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Pull request number must be greater than 0" })),
+        )
+            .into_response();
+    }
+
+    let pr = req.pr;
+    let publish = req.publish.unwrap_or(false);
+    info!(
+        "Received manual review trigger for {} #{} (publish: {})",
+        repo, pr, publish
+    );
+
+    let started = spawn_review_job(state, repo.clone(), pr, publish, "manual").await;
+    let (status_str, message) = if started {
+        (
+            "queued",
+            format!("Review pipeline started for {} #{}", repo, pr),
+        )
+    } else {
+        (
+            "already_running",
+            format!("Review already in progress for {} #{}", repo, pr),
+        )
+    };
 
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({
-            "status": "queued",
+            "status": status_str,
             "repo": repo,
             "pr": pr,
-            "message": format!("Review pipeline started for {} #{}", repo, pr)
+            "message": message
         })),
     )
         .into_response()
@@ -808,7 +1056,6 @@ async fn handle_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // 1. Verify HMAC signature if webhook_secret is configured; fail closed otherwise
     match &state.webhook_secret {
         Some(secret) if !secret.is_empty() => {
             if !verify_signature(secret, &headers, &body) {
@@ -828,7 +1075,6 @@ async fn handle_webhook(
         }
     }
 
-    // 2. Parse JSON payload
     let payload: WebhookPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
@@ -878,7 +1124,6 @@ async fn handle_webhook(
             );
         }
 
-        // Only handle comments on pull requests
         if event == "issue_comment" {
             let is_pr = payload
                 .issue
@@ -919,14 +1164,22 @@ async fn handle_webhook(
         );
     };
 
-    let (pr_num, repo) = match (pr_index, repo_full_name) {
-        (Some(num), Some(r)) => (num, r),
+    let (pr_num, raw_repo) = match (pr_index, repo_full_name) {
+        (Some(num), Some(r)) if num > 0 => (num, r),
         _ => {
-            warn!("Webhook missing PR number or repository name");
+            warn!("Webhook missing valid PR number or repository name");
             return (
                 StatusCode::BAD_REQUEST,
-                "Missing PR number or repo name".to_string(),
+                "Missing valid PR number or repo name".to_string(),
             );
+        }
+    };
+
+    let repo = match validate_repo_slug(&raw_repo) {
+        Ok(r) => r.to_string(),
+        Err(msg) => {
+            warn!("Rejected webhook repository '{}': {}", raw_repo, msg);
+            return (StatusCode::BAD_REQUEST, msg.to_string());
         }
     };
 
@@ -935,53 +1188,18 @@ async fn handle_webhook(
         event, repo, pr_num, action
     );
 
-    let config_path = state.config_path.clone();
-    let repo_for_review = repo.clone();
-    let state_clone = state.clone();
-
-    // Spawn review asynchronously in background so webhook returns 200 immediately
-    tokio::spawn(async move {
-        let start = std::time::Instant::now();
-        let db_opt = state_clone.db.as_ref();
-        if let Err(e) = run_pr_review(
-            pr_num,
-            Some(&repo_for_review),
-            false,
-            config_path.as_deref(),
-            db_opt,
+    let started = spawn_review_job(state, repo.clone(), pr_num, true, "webhook").await;
+    if started {
+        (
+            StatusCode::ACCEPTED,
+            format!("Review queued for {} #{}", repo, pr_num),
         )
-        .await
-        {
-            let duration_ms = start.elapsed().as_millis() as u64;
-            error!(
-                "Failed to execute review for {} #{}: {:?}",
-                repo_for_review, pr_num, e
-            );
-            if let Some(db) = db_opt {
-                let rec = crate::db::NewReviewRecord {
-                    repo: &repo_for_review,
-                    pr_number: pr_num as i64,
-                    title: &format!("PR #{}: Webhook review failed", pr_num),
-                    author: "unknown",
-                    status: "failed",
-                    provider_used: "error",
-                    pass1: 0,
-                    pass2: 0,
-                    verified: 0,
-                    cost_saved: 0.0,
-                    duration_ms: duration_ms as i64,
-                    summary: &format!("Webhook review execution failed: {}", e),
-                    findings_json: "[]",
-                };
-                let _ = db.record_review(&rec).await;
-            }
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        format!("Review queued for {} #{}", repo, pr_num),
-    )
+    } else {
+        (
+            StatusCode::ACCEPTED,
+            format!("Review already running for {} #{}", repo, pr_num),
+        )
+    }
 }
 
 async fn add_cache_headers(req: Request, next: Next) -> Response {
@@ -1004,6 +1222,24 @@ async fn add_cache_headers(req: Request, next: Next) -> Response {
     res
 }
 
+fn build_api_router(state: Arc<ServerState>, cors: CorsLayer) -> Router {
+    Router::new()
+        .route("/health", get(health_check))
+        .route("/webhook", post(handle_webhook))
+        .route("/api/status", get(get_status))
+        .route("/api/reviews", get(get_reviews))
+        .route("/api/trigger", post(trigger_review))
+        .route(
+            "/api/feedback",
+            get(get_all_feedback).post(record_finding_feedback),
+        )
+        .route("/api/feedback/delete", post(delete_feedback_entry))
+        .route("/api/skills", get(get_available_skills))
+        .route("/api/rules/synthesize", post(handle_synthesize_rule))
+        .layer(cors)
+        .with_state(state)
+}
+
 /// Starts the HTTP daemon serving the review API, web dashboard, and webhook receiver.
 pub async fn run_daemon(
     listen: &str,
@@ -1017,7 +1253,6 @@ pub async fn run_daemon(
     let loaded_cfg = RevueConfig::find_and_load(config_path).ok();
     let non_blank = |s: &str| !s.trim().is_empty();
 
-    // Determine webhook secret priority with non-blank filtering per source
     let resolved_secret = webhook_secret
         .filter(|s| non_blank(s))
         .map(str::to_string)
@@ -1042,12 +1277,15 @@ pub async fn run_daemon(
     if resolved_secret.is_some() {
         info!("Webhook HMAC-SHA256 signature verification is ENABLED");
     } else if resolved_insecure {
-        warn!("Webhook signature verification is DISABLED (--insecure-webhooks enabled). Insecure mode!");
+        warn!(
+            "Webhook signature verification is DISABLED (--insecure-webhooks enabled). Insecure mode!"
+        );
     } else {
-        info!("Webhook secret is not configured; incoming webhooks will fail closed (401 Unauthorized). Set REVUE_WEBHOOK_SECRET or pass --insecure-webhooks to allow.");
+        info!(
+            "Webhook secret is not configured; incoming webhooks will fail closed (401 Unauthorized). Set REVUE_WEBHOOK_SECRET or pass --insecure-webhooks to allow."
+        );
     }
 
-    // Determine API key priority with non-blank filtering per source
     let resolved_api_key = api_key
         .filter(|k| non_blank(k))
         .map(str::to_string)
@@ -1060,9 +1298,11 @@ pub async fn run_daemon(
         .or_else(|| std::env::var("REVUE_API_KEY").ok().filter(|k| non_blank(k)));
 
     if resolved_api_key.is_some() {
-        info!("API authentication is ENABLED (valid API key required for /api mutating operations)");
+        info!("API authentication is ENABLED (valid API key required for protected /api routes)");
     } else {
-        info!("API key is not configured; /api mutating operations restricted to loopback (127.0.0.1 / ::1) clients only.");
+        info!(
+            "API key is not configured; protected /api routes restricted to loopback (127.0.0.1 / ::1) clients only."
+        );
     }
 
     let db_url = database_url
@@ -1080,16 +1320,13 @@ pub async fn run_daemon(
         }
     };
 
-    let state = Arc::new(ServerState {
-        config_path: config_path.map(|s| s.to_string()),
-        webhook_secret: resolved_secret,
-        api_key: resolved_api_key,
-        insecure_webhooks: resolved_insecure,
-        start_time: Instant::now(),
+    let state = Arc::new(ServerState::new(
+        config_path.map(|s| s.to_string()),
+        resolved_secret,
+        resolved_api_key,
+        resolved_insecure,
         db,
-        reviews: Arc::new(RwLock::new(Vec::new())),
-        manual_review_seq: Arc::new(AtomicU64::new(1)),
-    });
+    ));
 
     let mut allowed_origins: Vec<HeaderValue> = Vec::new();
     if let Some(cfg) = &loaded_cfg {
@@ -1099,7 +1336,6 @@ pub async fn run_daemon(
             }
         }
     }
-    // Always permit local development / loopback origins for web UI
     for origin in &[
         "http://localhost:8383",
         "http://127.0.0.1:8383",
@@ -1128,34 +1364,11 @@ pub async fn run_daemon(
             HeaderName::from_static("x-gitea-signature"),
         ]);
 
-    let api_router = Router::new()
-        .route("/health", get(health_check))
-        .route("/webhook", post(handle_webhook))
-        .route("/api/status", get(get_status))
-        .route("/api/reviews", get(get_reviews))
-        .route("/api/trigger", post(trigger_review))
-        .route(
-            "/api/feedback",
-            get(get_all_feedback).post(record_finding_feedback),
-        )
-        .route("/api/feedback/delete", post(delete_feedback_entry))
-        .route("/api/skills", get(get_available_skills))
-        .route("/api/rules/synthesize", post(handle_synthesize_rule))
-        .layer(cors)
-        .with_state(state.clone());
+    let api_router = build_api_router(state, cors);
 
-    // Resolve static files directory for SvelteKit web dashboard:
-    // 1. Explicit CLI argument / env var
-    // 2. ./web/build (local development)
-    // 3. ../share/revue/web relative to executable (Nix store / standard install)
-    // 4. /var/lib/revue/web (system directory)
     let resolved_static_dir = if let Some(dir) = static_dir {
         let p = PathBuf::from(dir);
-        if p.exists() {
-            Some(p)
-        } else {
-            None
-        }
+        p.exists().then_some(p)
     } else {
         let candidate_rel = PathBuf::from("./web/build");
         let candidate_share = std::env::current_exe()
@@ -1266,8 +1479,7 @@ mod tests {
             HeaderValue::from_str(&format!("sha256={}", sig)).unwrap(),
         );
 
-        let tampered_body = b"tampered";
-        assert!(!verify_signature(secret, &headers, tampered_body));
+        assert!(!verify_signature(secret, &headers, b"tampered"));
     }
 
     #[test]
@@ -1291,12 +1503,26 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_repo_slug() {
+        assert_eq!(validate_repo_slug("owner/repo"), Ok("owner/repo"));
+        assert_eq!(
+            validate_repo_slug("git.example.com/owner/repo"),
+            Ok("git.example.com/owner/repo")
+        );
+        assert!(validate_repo_slug("").is_err());
+        assert!(validate_repo_slug("just-repo").is_err());
+        assert!(validate_repo_slug("../evil").is_err());
+        assert!(validate_repo_slug("/owner/repo").is_err());
+        assert!(validate_repo_slug("owner/repo/extra/deep").is_err());
+    }
+
+    #[test]
     fn test_webhook_payload_pr_review_comment() {
         let json_data = r#"{
             "action": "created",
             "comment": { "body": "@revue please re-evaluate this suggestion" },
             "pull_request": { "number": 42 },
-            "repository": { "full_name": "kleinbem/nix-config" }
+            "repository": { "full_name": "owner/nix-config" }
         }"#;
         let payload: WebhookPayload = serde_json::from_str(json_data).unwrap();
         assert_eq!(payload.action.as_deref(), Some("created"));
@@ -1304,7 +1530,7 @@ mod tests {
         assert!(payload.comment.unwrap().body.unwrap().contains("@revue"));
         assert_eq!(
             payload.repository.unwrap().full_name.as_deref(),
-            Some("kleinbem/nix-config")
+            Some("owner/nix-config")
         );
     }
 
@@ -1332,22 +1558,17 @@ mod tests {
 
     #[test]
     fn test_api_auth_with_configured_key() {
-        let state = ServerState {
-            config_path: None,
-            webhook_secret: None,
-            api_key: Some("secret-token-xyz".to_string()),
-            insecure_webhooks: false,
-            start_time: Instant::now(),
-            db: None,
-            reviews: Arc::new(RwLock::new(Vec::new())),
-            manual_review_seq: Arc::new(AtomicU64::new(0)),
-        };
+        let state = ServerState::new(
+            None,
+            None,
+            Some("secret-token-xyz".to_string()),
+            false,
+            None,
+        );
 
-        // Missing header -> 401
         let empty_headers = HeaderMap::new();
         assert!(check_api_auth(&empty_headers, &state, None).is_err());
 
-        // Bearer token -> 200
         let mut bearer_headers = HeaderMap::new();
         bearer_headers.insert(
             header::AUTHORIZATION,
@@ -1355,12 +1576,10 @@ mod tests {
         );
         assert!(check_api_auth(&bearer_headers, &state, None).is_ok());
 
-        // X-Revue-Key header -> 200
         let mut custom_headers = HeaderMap::new();
         custom_headers.insert("x-revue-key", HeaderValue::from_static("secret-token-xyz"));
         assert!(check_api_auth(&custom_headers, &state, None).is_ok());
 
-        // Invalid key -> 401
         let mut wrong_headers = HeaderMap::new();
         wrong_headers.insert(
             header::AUTHORIZATION,
@@ -1371,37 +1590,252 @@ mod tests {
 
     #[test]
     fn test_api_auth_loopback_restriction() {
-        let state = ServerState {
-            config_path: None,
-            webhook_secret: None,
-            api_key: None,
-            insecure_webhooks: false,
-            start_time: Instant::now(),
-            db: None,
-            reviews: Arc::new(RwLock::new(Vec::new())),
-            manual_review_seq: Arc::new(AtomicU64::new(0)),
-        };
-
+        let state = ServerState::new(None, None, None, false, None);
         let headers = HeaderMap::new();
 
-        // Loopback IPv4 -> Ok
         let loopback_v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
         assert!(check_api_auth(&headers, &state, Some(loopback_v4)).is_ok());
 
-        // Loopback IPv6 -> Ok
         let loopback_v6: std::net::IpAddr = "::1".parse().unwrap();
         assert!(check_api_auth(&headers, &state, Some(loopback_v6)).is_ok());
 
-        // Missing client IP without API key configured -> 403 Forbidden (fail closed)
         assert_eq!(
             check_api_auth(&headers, &state, None).unwrap_err().0,
             StatusCode::FORBIDDEN
         );
 
-        // Remote IP without API key configured -> 403 Forbidden
         let remote_ip: std::net::IpAddr = "192.168.1.100".parse().unwrap();
         let res = check_api_auth(&headers, &state, Some(remote_ip));
-        assert!(res.is_err());
         assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_http_endpoints_auth_validation_and_feedback_hydration() {
+        let db = crate::db::DbPool::connect("sqlite::memory:").await.unwrap();
+        db.record_review(&crate::db::NewReviewRecord {
+            repo: "owner/repo",
+            pr_number: 7,
+            title: "feat: add cache",
+            author: "alice",
+            status: "completed",
+            provider_used: "Antigravity CLI",
+            pass1: 3,
+            pass2: 2,
+            verified: 1,
+            cost_saved: 0.0,
+            duration_ms: 4200,
+            summary: "Looks solid",
+            findings_json: r#"[{"file":"src/lib.rs","line":10,"severity":"bug","title":"False alarm","comment":"Check bounds","confidence":9}]"#,
+        })
+        .await
+        .unwrap();
+
+        let state = ServerState::new(
+            None,
+            Some("wh-secret-99".to_string()),
+            Some("api-key-99".to_string()),
+            false,
+            Some(db),
+        );
+
+        let app = build_api_router(Arc::new(state), CorsLayer::new())
+            .layer(middleware::from_fn(add_cache_headers));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        // 1. Public health & status
+        let health = client.get(format!("{base}/health")).send().await.unwrap();
+        assert_eq!(health.status(), 200);
+        assert!(
+            health
+                .headers()
+                .get("cache-control")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("no-store")
+        );
+
+        let status_json: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status_json["status"], "healthy");
+        assert_eq!(status_json["engine"], "revue");
+
+        // 2. Protected GET routes require API key when configured
+        for route in ["/api/reviews", "/api/feedback", "/api/skills"] {
+            let unauth = client.get(format!("{base}{route}")).send().await.unwrap();
+            assert_eq!(unauth.status(), 401, "{route} must reject missing API key");
+        }
+
+        // 3. Invalid trigger inputs rejected with 400
+        for bad_trigger in [
+            serde_json::json!({ "repo": "../evil", "pr": 1 }),
+            serde_json::json!({ "repo": "owner/repo", "pr": 0 }),
+        ] {
+            let bad = client
+                .post(format!("{base}/api/trigger"))
+                .header("x-revue-key", "api-key-99")
+                .json(&bad_trigger)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(bad.status(), 400);
+        }
+
+        // 4. Webhook signature & payload checks
+        let unsigned = client
+            .post(format!("{base}/webhook"))
+            .body(r#"{"action":"closed"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unsigned.status(), 401);
+
+        let body =
+            br#"{"action":"closed","pull_request":{"number":1},"repository":{"full_name":"a/b"}}"#;
+        let sig = compute_hmac("wh-secret-99", body);
+        let signed = client
+            .post(format!("{base}/webhook"))
+            .header("x-github-event", "pull_request")
+            .header("x-hub-signature-256", format!("sha256={sig}"))
+            .body(body.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(signed.status(), 200);
+
+        let bad_body = b"{not-json";
+        let bad_sig = compute_hmac("wh-secret-99", bad_body);
+        let malformed = client
+            .post(format!("{base}/webhook"))
+            .header("x-github-event", "pull_request")
+            .header("x-hub-signature-256", format!("sha256={bad_sig}"))
+            .body(bad_body.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), 400);
+
+        // 5. Feedback CRUD + hydration into GET /api/reviews
+        let no_key = client
+            .post(format!("{base}/api/feedback"))
+            .json(&serde_json::json!({
+                "repo": "owner/repo",
+                "file_path": "src/lib.rs",
+                "issue_title": "False alarm",
+                "feedback_type": "false_positive"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_key.status(), 401);
+
+        let created = client
+            .post(format!("{base}/api/feedback"))
+            .header("x-revue-key", "api-key-99")
+            .json(&serde_json::json!({
+                "repo": "owner/repo",
+                "file_path": "src/lib.rs",
+                "issue_title": "False alarm",
+                "feedback_type": "false_positive",
+                "reason": "Handled upstream"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), 200);
+
+        let reviews_resp: serde_json::Value = client
+            .get(format!("{base}/api/reviews"))
+            .header("x-revue-key", "api-key-99")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            reviews_resp[0]["findings"][0]["feedback"], "false_positive",
+            "DB review findings must hydrate dismissed feedback state"
+        );
+
+        let list_resp: serde_json::Value = client
+            .get(format!("{base}/api/feedback"))
+            .header("x-revue-key", "api-key-99")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let list = list_resp["feedback"].as_array().unwrap();
+        assert_eq!(list.len(), 1);
+        let id = list[0]["id"].as_i64().unwrap();
+
+        let deleted = client
+            .post(format!("{base}/api/feedback/delete"))
+            .header("authorization", "Bearer api-key-99")
+            .json(&serde_json::json!({ "id": id }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), 200);
+
+        let list_after_resp: serde_json::Value = client
+            .get(format!("{base}/api/feedback"))
+            .header("x-revue-key", "api-key-99")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(list_after_resp["feedback"].as_array().unwrap().is_empty());
+
+        server_task.abort();
+    }
+
+    #[test]
+    fn test_cap_terminal_reviews_retains_running_records() {
+        let mk = |id: &str, status: &str| ReviewRecord {
+            id: id.to_string(),
+            repo: "owner/repo".to_string(),
+            pr_number: 1,
+            title: None,
+            status: status.to_string(),
+            pass1_candidates: 0,
+            pass2_verified: 0,
+            duration_secs: 0,
+            provider_used: "mock".to_string(),
+            created_at: String::new(),
+            summary: String::new(),
+            forge: "github".to_string(),
+            findings: Vec::new(),
+        };
+        let mut reviews = vec![
+            mk("t1", "completed"),
+            mk("t2", "failed"),
+            mk("t3", "completed"),
+            mk("run-oldest", "running"),
+        ];
+        cap_terminal_reviews(&mut reviews, 2);
+        let ids: Vec<&str> = reviews.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["t1", "t2", "run-oldest"]);
     }
 }

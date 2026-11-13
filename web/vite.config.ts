@@ -1,31 +1,11 @@
-import adapter from '@sveltejs/adapter-static';
-import { sveltekit } from '@sveltejs/kit/vite';
-import tailwindcss from '@tailwindcss/vite';
-import { defineConfig } from 'vite';
+import { defineWebConfig } from '@kleinbem/web-config/vite';
 
-export default defineConfig({
-	plugins: [
-		tailwindcss(),
-		sveltekit({
-			adapter: adapter({
-				fallback: '200.html'
-			}),
-			compilerOptions: {
-				experimental: {
-					async: true
-				},
-				fragments: 'html'
-			},
-			dynamicCompileOptions({ filename }) {
-				if (!filename.includes('node_modules')) {
-					return { runes: true };
-				}
-			},
-			experimental: {
-				forkPreloads: true
-			}
-		})
-	],
+export default defineWebConfig({
+	adapterOptions: {
+		pages: 'build',
+		assets: 'build',
+		fallback: '200.html'
+	},
 	server: {
 		proxy: {
 			'/api': 'http://127.0.0.1:8383',

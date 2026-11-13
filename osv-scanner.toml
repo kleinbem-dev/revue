@@ -1,9 +1,5 @@
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0449"
-ignoreUntil = 2027-02-03
-reason = "unsafe-libyaml is unmaintained, no fixed release; comes in via serde_yaml, replacement tracked in kleinbem-dev/revue#16"
-
+# WORKAROUND(sqlx): sqlx-sqlite 0.9.0 constrains `libsqlite3-sys < 0.38`, blocking the 0.39 bump in pure Cargo builds — remove when sqlx >= 0.9.1 relaxes `libsqlite3-sys` (upstream: transact-rs/sqlx#4516, tracking: kleinbem-dev/revue#46). Nix builds dynamically link system `pkgs.sqlite` (>= 3.54) and are unaffected.
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0459"
 ignoreUntil = 2027-02-09
-reason = "No sqlx release allows the fixed libsqlite3-sys 0.39 (sqlx-sqlite 0.9.0 requires <0.38). The default database is revue.db in revue's state directory; DATABASE_URL or --database-url can point elsewhere. Exposure needs a less-trusted user able to write the database's directory (to plant the -wal file). Tracked in kleinbem-dev/revue#46"
+reason = "No sqlx release allows the fixed libsqlite3-sys 0.39 (sqlx-sqlite 0.9.0 requires <0.38). Nix builds link system sqlite >= 3.54 dynamically; default database lives in revue's private state directory."

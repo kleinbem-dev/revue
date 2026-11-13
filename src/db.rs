@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Row, SqlitePool};
+use sqlx::{FromRow, PgPool, SqlitePool};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -11,7 +12,16 @@ pub enum DbPool {
     Postgres(PgPool),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+macro_rules! dispatch_pool {
+    ($self:expr, $pool:ident => $body:expr) => {
+        match $self {
+            DbPool::Sqlite($pool) => $body,
+            DbPool::Postgres($pool) => $body,
+        }
+    };
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct StoredReview {
     pub id: i64,
     pub repo: String,
@@ -30,7 +40,7 @@ pub struct StoredReview {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AggregateMetrics {
     pub total_reviews: i64,
     pub pass1_candidates: i64,
@@ -39,7 +49,7 @@ pub struct AggregateMetrics {
     pub total_cost_saved: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FindingFeedback {
     pub id: i64,
     pub repo: String,
@@ -160,12 +170,14 @@ impl DbPool {
         .await
         .context("Failed to initialize SQLite schema")?;
 
+        // Backfill columns for databases created before `summary` and `findings_json` existed.
         let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN summary TEXT NOT NULL DEFAULT '';")
             .execute(pool)
             .await;
-        let _ = sqlx::query("ALTER TABLE reviews ADD COLUMN findings_json TEXT NOT NULL DEFAULT '[]';")
-            .execute(pool)
-            .await;
+        let _ =
+            sqlx::query("ALTER TABLE reviews ADD COLUMN findings_json TEXT NOT NULL DEFAULT '[]';")
+                .execute(pool)
+                .await;
 
         Ok(())
     }
@@ -209,32 +221,35 @@ impl DbPool {
         .await
         .context("Failed to initialize PostgreSQL schema")?;
 
-        sqlx::query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '';")
-            .execute(pool)
-            .await
-            .context("Failed to add reviews.summary column")?;
-        sqlx::query("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS findings_json TEXT NOT NULL DEFAULT '[]';")
-            .execute(pool)
-            .await
-            .context("Failed to add reviews.findings_json column")?;
+        sqlx::query(
+            "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '';",
+        )
+        .execute(pool)
+        .await
+        .context("Failed to migrate reviews.summary column")?;
+        sqlx::query(
+            "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS findings_json TEXT NOT NULL DEFAULT '[]';",
+        )
+        .execute(pool)
+        .await
+        .context("Failed to migrate reviews.findings_json column")?;
 
         Ok(())
     }
 
-    /// Records an executed review run into the persistent database with summary and findings.
+    /// Records an executed review run and returns its primary key.
     pub async fn record_review(&self, rec: &NewReviewRecord<'_>) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
+        let sql = r#"
+            INSERT INTO reviews (repo, pr_number, title, author, status, provider_used,
+                                 pass1_candidates, pass2_filtered, verified_findings,
+                                 cost_saved_usd, duration_ms, summary, findings_json, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            RETURNING id
+        "#;
 
-        match self {
-            DbPool::Sqlite(pool) => {
-                let res = sqlx::query(
-                    r#"
-                    INSERT INTO reviews (repo, pr_number, title, author, status, provider_used,
-                                         pass1_candidates, pass2_filtered, verified_findings,
-                                         cost_saved_usd, duration_ms, summary, findings_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    "#,
-                )
+        dispatch_pool!(self, pool => {
+            let id: i64 = sqlx::query_scalar(sql)
                 .bind(rec.repo)
                 .bind(rec.pr_number)
                 .bind(rec.title)
@@ -248,173 +263,46 @@ impl DbPool {
                 .bind(rec.duration_ms)
                 .bind(rec.summary)
                 .bind(rec.findings_json)
-                .bind(now)
-                .execute(pool)
-                .await?;
-
-                Ok(res.last_insert_rowid())
-            }
-            DbPool::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    INSERT INTO reviews (repo, pr_number, title, author, status, provider_used,
-                                         pass1_candidates, pass2_filtered, verified_findings,
-                                         cost_saved_usd, duration_ms, summary, findings_json, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                    RETURNING id
-                    "#,
-                )
-                .bind(rec.repo)
-                .bind(rec.pr_number)
-                .bind(rec.title)
-                .bind(rec.author)
-                .bind(rec.status)
-                .bind(rec.provider_used)
-                .bind(rec.pass1)
-                .bind(rec.pass2)
-                .bind(rec.verified)
-                .bind(rec.cost_saved)
-                .bind(rec.duration_ms)
-                .bind(rec.summary)
-                .bind(rec.findings_json)
-                .bind(now)
+                .bind(&now)
                 .fetch_one(pool)
                 .await?;
-
-                Ok(row.get("id"))
-            }
-        }
+            Ok(id)
+        })
     }
 
     pub async fn get_metrics(&self) -> Result<AggregateMetrics> {
-        match self {
-            DbPool::Sqlite(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        COUNT(*) as total_reviews,
-                        COALESCE(SUM(pass1_candidates), 0) as pass1_candidates,
-                        COALESCE(SUM(pass2_filtered), 0) as pass2_filtered,
-                        COALESCE(SUM(verified_findings), 0) as verified_findings,
-                        COALESCE(SUM(cost_saved_usd), 0.0) as total_cost_saved
-                    FROM reviews
-                    "#,
-                )
-                .fetch_one(pool)
-                .await?;
+        let sql = r#"
+            SELECT
+                COUNT(*) AS total_reviews,
+                CAST(COALESCE(SUM(pass1_candidates), 0) AS BIGINT) AS pass1_candidates,
+                CAST(COALESCE(SUM(pass2_filtered), 0) AS BIGINT) AS pass2_filtered,
+                CAST(COALESCE(SUM(verified_findings), 0) AS BIGINT) AS verified_findings,
+                CAST(COALESCE(SUM(cost_saved_usd), 0.0) AS DOUBLE PRECISION) AS total_cost_saved
+            FROM reviews
+        "#;
 
-                Ok(AggregateMetrics {
-                    total_reviews: row.get("total_reviews"),
-                    pass1_candidates: row.get("pass1_candidates"),
-                    pass2_filtered: row.get("pass2_filtered"),
-                    verified_findings: row.get("verified_findings"),
-                    total_cost_saved: row.get("total_cost_saved"),
-                })
-            }
-            DbPool::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        COUNT(*) as total_reviews,
-                        COALESCE(SUM(pass1_candidates), 0) as pass1_candidates,
-                        COALESCE(SUM(pass2_filtered), 0) as pass2_filtered,
-                        COALESCE(SUM(verified_findings), 0) as verified_findings,
-                        COALESCE(SUM(cost_saved_usd), 0.0) as total_cost_saved
-                    FROM reviews
-                    "#,
-                )
-                .fetch_one(pool)
-                .await?;
-
-                Ok(AggregateMetrics {
-                    total_reviews: row.get("total_reviews"),
-                    pass1_candidates: row.get("pass1_candidates"),
-                    pass2_filtered: row.get("pass2_filtered"),
-                    verified_findings: row.get("verified_findings"),
-                    total_cost_saved: row.get("total_cost_saved"),
-                })
-            }
-        }
+        dispatch_pool!(self, pool => {
+            Ok(sqlx::query_as::<_, AggregateMetrics>(sql).fetch_one(pool).await?)
+        })
     }
 
-    /// Lists the most recently recorded reviews up to the specified limit.
+    /// Lists the most recently recorded reviews up to `limit`.
     pub async fn list_recent_reviews(&self, limit: i64) -> Result<Vec<StoredReview>> {
-        let mut reviews = Vec::new();
+        let sql = r#"
+            SELECT id, repo, pr_number, title, author, status, provider_used,
+                   pass1_candidates, pass2_filtered, verified_findings,
+                   cost_saved_usd, duration_ms, summary, findings_json, created_at
+            FROM reviews
+            ORDER BY id DESC
+            LIMIT $1
+        "#;
 
-        match self {
-            DbPool::Sqlite(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id, repo, pr_number, title, author, status, provider_used,
-                           pass1_candidates, pass2_filtered, verified_findings,
-                           cost_saved_usd, duration_ms, summary, findings_json, created_at
-                    FROM reviews
-                    ORDER BY id DESC
-                    LIMIT ?
-                    "#,
-                )
+        dispatch_pool!(self, pool => {
+            Ok(sqlx::query_as::<_, StoredReview>(sql)
                 .bind(limit)
                 .fetch_all(pool)
-                .await?;
-
-                for r in rows {
-                    reviews.push(StoredReview {
-                        id: r.get("id"),
-                        repo: r.get("repo"),
-                        pr_number: r.get("pr_number"),
-                        title: r.get("title"),
-                        author: r.get("author"),
-                        status: r.get("status"),
-                        provider_used: r.get("provider_used"),
-                        pass1_candidates: r.get("pass1_candidates"),
-                        pass2_filtered: r.get("pass2_filtered"),
-                        verified_findings: r.get("verified_findings"),
-                        cost_saved_usd: r.get("cost_saved_usd"),
-                        duration_ms: r.get("duration_ms"),
-                        summary: r.get("summary"),
-                        findings_json: r.get("findings_json"),
-                        created_at: r.get("created_at"),
-                    });
-                }
-            }
-            DbPool::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id, repo, pr_number, title, author, status, provider_used,
-                           pass1_candidates, pass2_filtered, verified_findings,
-                           cost_saved_usd, duration_ms, summary, findings_json, created_at
-                    FROM reviews
-                    ORDER BY id DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-
-                for r in rows {
-                    reviews.push(StoredReview {
-                        id: r.get("id"),
-                        repo: r.get("repo"),
-                        pr_number: r.get("pr_number"),
-                        title: r.get("title"),
-                        author: r.get("author"),
-                        status: r.get("status"),
-                        provider_used: r.get("provider_used"),
-                        pass1_candidates: r.get("pass1_candidates"),
-                        pass2_filtered: r.get("pass2_filtered"),
-                        verified_findings: r.get("verified_findings"),
-                        cost_saved_usd: r.get("cost_saved_usd"),
-                        duration_ms: r.get("duration_ms"),
-                        summary: r.get("summary"),
-                        findings_json: r.get("findings_json"),
-                        created_at: r.get("created_at"),
-                    });
-                }
-            }
-        }
-
-        Ok(reviews)
+                .await?)
+        })
     }
 
     pub async fn record_feedback(
@@ -426,46 +314,24 @@ impl DbPool {
         reason: Option<&str>,
     ) -> Result<i64> {
         let now = Utc::now().to_rfc3339();
+        let sql = r#"
+            INSERT INTO findings_feedback (repo, file_path, issue_title, feedback_type, reason, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+        "#;
 
-        match self {
-            DbPool::Sqlite(pool) => {
-                let res = sqlx::query(
-                    r#"
-                    INSERT INTO findings_feedback (repo, file_path, issue_title, feedback_type, reason, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    "#
-                )
+        dispatch_pool!(self, pool => {
+            let id: i64 = sqlx::query_scalar(sql)
                 .bind(repo)
                 .bind(file_path)
                 .bind(issue_title)
                 .bind(feedback_type)
                 .bind(reason)
-                .bind(now)
-                .execute(pool)
-                .await?;
-
-                Ok(res.last_insert_rowid())
-            }
-            DbPool::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    INSERT INTO findings_feedback (repo, file_path, issue_title, feedback_type, reason, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    RETURNING id
-                    "#
-                )
-                .bind(repo)
-                .bind(file_path)
-                .bind(issue_title)
-                .bind(feedback_type)
-                .bind(reason)
-                .bind(now)
+                .bind(&now)
                 .fetch_one(pool)
                 .await?;
-
-                Ok(row.get(0))
-            }
-        }
+            Ok(id)
+        })
     }
 
     pub async fn get_false_positives(
@@ -473,148 +339,79 @@ impl DbPool {
         repo: &str,
         limit: i64,
     ) -> Result<Vec<FindingFeedback>> {
-        match self {
-            DbPool::Sqlite(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
-                    FROM findings_feedback
-                    WHERE repo = ? AND feedback_type = 'false_positive'
-                    ORDER BY id DESC
-                    LIMIT ?
-                    "#,
-                )
+        let sql = r#"
+            SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+            FROM findings_feedback
+            WHERE repo = $1 AND feedback_type = 'false_positive'
+            ORDER BY id DESC
+            LIMIT $2
+        "#;
+
+        dispatch_pool!(self, pool => {
+            Ok(sqlx::query_as::<_, FindingFeedback>(sql)
                 .bind(repo)
                 .bind(limit)
                 .fetch_all(pool)
-                .await?;
-
-                let feedback = rows
-                    .into_iter()
-                    .map(|r| FindingFeedback {
-                        id: r.get(0),
-                        repo: r.get(1),
-                        file_path: r.get(2),
-                        issue_title: r.get(3),
-                        feedback_type: r.get(4),
-                        reason: r.get(5),
-                        created_at: r.get(6),
-                    })
-                    .collect();
-
-                Ok(feedback)
-            }
-            DbPool::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
-                    FROM findings_feedback
-                    WHERE repo = $1 AND feedback_type = 'false_positive'
-                    ORDER BY id DESC
-                    LIMIT $2
-                    "#,
-                )
-                .bind(repo)
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-
-                let feedback = rows
-                    .into_iter()
-                    .map(|r| FindingFeedback {
-                        id: r.get(0),
-                        repo: r.get(1),
-                        file_path: r.get(2),
-                        issue_title: r.get(3),
-                        feedback_type: r.get(4),
-                        reason: r.get(5),
-                        created_at: r.get(6),
-                    })
-                    .collect();
-
-                Ok(feedback)
-            }
-        }
+                .await?)
+        })
     }
 
     pub async fn list_all_feedback(&self, limit: i64) -> Result<Vec<FindingFeedback>> {
-        match self {
-            DbPool::Sqlite(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
-                    FROM findings_feedback
-                    ORDER BY id DESC
-                    LIMIT ?
-                    "#,
-                )
+        let sql = r#"
+            SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+            FROM findings_feedback
+            ORDER BY id DESC
+            LIMIT $1
+        "#;
+
+        dispatch_pool!(self, pool => {
+            Ok(sqlx::query_as::<_, FindingFeedback>(sql)
                 .bind(limit)
                 .fetch_all(pool)
-                .await?;
+                .await?)
+        })
+    }
 
-                let feedback = rows
-                    .into_iter()
-                    .map(|r| FindingFeedback {
-                        id: r.get(0),
-                        repo: r.get(1),
-                        file_path: r.get(2),
-                        issue_title: r.get(3),
-                        feedback_type: r.get(4),
-                        reason: r.get(5),
-                        created_at: r.get(6),
-                    })
-                    .collect();
+    /// Maps `(repo, file_path, issue_title) -> feedback_type` for `repos` so dashboard reloads retain dismissals.
+    pub async fn feedback_lookup_for_repos(
+        &self,
+        repos: &[String],
+    ) -> Result<HashMap<(String, String, String), String>> {
+        let mut seen_repos = std::collections::HashSet::new();
+        let mut map = HashMap::new();
+        let sql = r#"
+            SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
+            FROM findings_feedback
+            WHERE repo = $1
+            ORDER BY id ASC
+        "#;
 
-                Ok(feedback)
+        for repo in repos {
+            if !seen_repos.insert(repo.as_str()) {
+                continue;
             }
-            DbPool::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT id, repo, file_path, issue_title, feedback_type, reason, created_at
-                    FROM findings_feedback
-                    ORDER BY id DESC
-                    LIMIT $1
-                    "#,
-                )
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-
-                let feedback = rows
-                    .into_iter()
-                    .map(|r| FindingFeedback {
-                        id: r.get(0),
-                        repo: r.get(1),
-                        file_path: r.get(2),
-                        issue_title: r.get(3),
-                        feedback_type: r.get(4),
-                        reason: r.get(5),
-                        created_at: r.get(6),
-                    })
-                    .collect();
-
-                Ok(feedback)
+            let entries: Vec<FindingFeedback> = dispatch_pool!(self, pool => {
+                sqlx::query_as::<_, FindingFeedback>(sql)
+                    .bind(repo)
+                    .fetch_all(pool)
+                    .await?
+            });
+            for entry in entries {
+                map.insert(
+                    (entry.repo, entry.file_path, entry.issue_title),
+                    entry.feedback_type,
+                );
             }
         }
+        Ok(map)
     }
 
     pub async fn delete_feedback(&self, id: i64) -> Result<bool> {
-        match self {
-            DbPool::Sqlite(pool) => {
-                let res = sqlx::query("DELETE FROM findings_feedback WHERE id = ?")
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                Ok(res.rows_affected() > 0)
-            }
-            DbPool::Postgres(pool) => {
-                let res = sqlx::query("DELETE FROM findings_feedback WHERE id = $1")
-                    .bind(id)
-                    .execute(pool)
-                    .await?;
-                Ok(res.rows_affected() > 0)
-            }
-        }
+        let sql = "DELETE FROM findings_feedback WHERE id = $1";
+        dispatch_pool!(self, pool => {
+            let res = sqlx::query(sql).bind(id).execute(pool).await?;
+            Ok(res.rows_affected() > 0)
+        })
     }
 }
 
@@ -697,5 +494,75 @@ mod tests {
             fps[0].reason.as_deref(),
             Some("Intentionally read-only in nspawn containers")
         );
+
+        let lookup = db
+            .feedback_lookup_for_repos(&["kleinbem/nix-config".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            lookup
+                .get(&(
+                    "kleinbem/nix-config".to_string(),
+                    "hosts/nixos-nvme/default.nix".to_string(),
+                    "ProtectHome read-only warning".to_string(),
+                ))
+                .map(String::as_str),
+            Some("false_positive")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_legacy_reviews_migration() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                author TEXT NOT NULL,
+                status TEXT NOT NULL,
+                provider_used TEXT NOT NULL,
+                pass1_candidates INTEGER NOT NULL DEFAULT 0,
+                pass2_filtered INTEGER NOT NULL DEFAULT 0,
+                verified_findings INTEGER NOT NULL DEFAULT 0,
+                cost_saved_usd REAL NOT NULL DEFAULT 0.0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        DbPool::init_sqlite(&pool).await.unwrap();
+        let db = DbPool::Sqlite(pool);
+        let id = db
+            .record_review(&NewReviewRecord {
+                repo: "owner/legacy",
+                pr_number: 1,
+                title: "legacy db test",
+                author: "dev",
+                status: "completed",
+                provider_used: "mock",
+                pass1: 1,
+                pass2: 1,
+                verified: 1,
+                cost_saved: 0.0,
+                duration_ms: 10,
+                summary: "migrated",
+                findings_json: "[]",
+            })
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let recent = db.list_recent_reviews(5).await.unwrap();
+        assert_eq!(recent[0].summary, "migrated");
     }
 }

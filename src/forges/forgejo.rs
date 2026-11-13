@@ -1,9 +1,11 @@
-use super::{DiscussionComment, Forge, InlineReviewComment, PrMetadata};
-use anyhow::{anyhow, Result};
+use super::{
+    DiscussionComment, Forge, InlineReviewComment, PrMetadata, build_http_client,
+    format_consolidated_review_body, parse_comments_array, parse_pr_metadata_json,
+};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct ForgejoClient {
     base_url: String,
@@ -26,25 +28,18 @@ struct ForgejoReviewComment<'a> {
 
 impl ForgejoClient {
     pub fn new(base_url: String, token: Option<String>) -> Result<Self> {
-        let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("revue/0.1.0"));
-        if let Some(t) = token {
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("token {}", t))
-                    .map_err(|e| anyhow!("Invalid auth token: {}", e))?,
-            );
+        let clean_url = base_url.trim().trim_end_matches('/').to_string();
+        if clean_url.is_empty() {
+            return Err(anyhow!(
+                "Forgejo/Gitea base URL is empty; set forge.url in .revue.yaml or FORGEJO_URL"
+            ));
         }
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))?;
-
+        let auth = token
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| format!("token {}", t.trim()));
         Ok(Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            client,
+            base_url: clean_url,
+            client: build_http_client(auth)?,
         })
     }
 }
@@ -94,106 +89,31 @@ impl Forge for ForgejoClient {
         }
 
         let val: serde_json::Value = res.json().await?;
-        let title = val.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let description = val.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let author = val
-            .get("user")
-            .and_then(|u| u.get("username").or_else(|| u.get("login")))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let head_sha = val
-            .get("head")
-            .and_then(|h| h.get("sha"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let head_ref = val
-            .get("head")
-            .and_then(|h| h.get("ref"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let base_ref = val
-            .get("base")
-            .and_then(|b| b.get("ref"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let is_draft = val.get("draft").and_then(|d| d.as_bool()).unwrap_or(false);
-        let labels = val
-            .get("labels")
-            .and_then(|l| l.as_array())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|item| item.get("name").and_then(|n| n.as_str()))
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(PrMetadata {
-            title,
-            description,
-            author,
-            head_sha,
-            head_ref,
-            base_ref,
-            labels,
-            repo: repo.to_string(),
-            pr_number: pr_index,
-            is_draft,
-        })
+        Ok(parse_pr_metadata_json(&val, repo, pr_index))
     }
 
-    async fn fetch_pr_comments(
-        &self,
-        repo: &str,
-        pr_index: u64,
-    ) -> Result<Vec<DiscussionComment>> {
-        let url = format!(
-            "{}/api/v1/repos/{}/issues/{}/comments?limit=100",
-            self.base_url, repo, pr_index
-        );
-        let res = self.client.get(&url).send().await?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            tracing::warn!(
-                "Failed to fetch Forgejo PR #{} comments: HTTP {} - {}",
-                pr_index,
-                status,
-                body
+    async fn fetch_pr_comments(&self, repo: &str, pr_index: u64) -> Result<Vec<DiscussionComment>> {
+        let mut comments = Vec::new();
+        for (endpoint, include_loc) in [("pulls", true), ("issues", false)] {
+            let url = format!(
+                "{}/api/v1/repos/{}/{}/{}/comments?limit=100",
+                self.base_url, repo, endpoint, pr_index
             );
-            return Ok(Vec::new());
+            if let Ok(res) = self.client.get(&url).send().await {
+                if res.status().is_success() {
+                    if let Ok(val) = res.json::<serde_json::Value>().await {
+                        comments.extend(parse_comments_array(&val, include_loc));
+                    }
+                } else {
+                    warn!(
+                        "Failed to fetch Forgejo PR #{} {} comments: HTTP {}",
+                        pr_index,
+                        endpoint,
+                        res.status()
+                    );
+                }
+            }
         }
-
-        let val: serde_json::Value = res.json().await?;
-        let comments = val
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| {
-                        let body = item.get("body").and_then(|b| b.as_str())?.to_string();
-                        let author = item
-                            .get("user")
-                            .and_then(|u| u.get("login"))
-                            .and_then(|l| l.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-
-                        Some(DiscussionComment {
-                            author,
-                            path: None,
-                            line: None,
-                            body,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
         Ok(comments)
     }
 
@@ -237,23 +157,16 @@ impl Forge for ForgejoClient {
             let err_text = res.text().await.unwrap_or_default();
 
             if (status.as_u16() == 422 || status.as_u16() == 400) && !comments.is_empty() {
-                tracing::warn!(
+                warn!(
                     "Forgejo rejected inline comments (status {}): {}. Retrying with consolidated review body...",
-                    status,
-                    err_text
+                    status, err_text
                 );
 
-                let mut fallback_body = summary.to_string();
-                fallback_body.push_str("\n\n### 📝 Inline Findings (Consolidated)\n\n");
-                for c in comments {
-                    fallback_body
-                        .push_str(&format!("- **`{}:{}`**\n{}\n\n", c.path, c.line, c.body));
-                }
-
+                let fallback_body = format_consolidated_review_body(summary, comments);
                 let fallback_req = CreateReviewRequest {
                     body: &fallback_body,
                     event: "COMMENT",
-                    comments: vec![],
+                    comments: Vec::new(),
                 };
 
                 let fallback_res = self

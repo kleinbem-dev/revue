@@ -38,6 +38,7 @@ jobs:
         run: |
           cd web
           nix develop .. --command npm ci
+          nix develop .. --command npm test
           nix develop .. --command npm run check
       - name: Unit tests
         run: nix develop --command cargo test --all-targets

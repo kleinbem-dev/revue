@@ -1,5 +1,5 @@
 {
-  description = "Self-hosted, forge-agnostic AI code review engine with multi-provider cascade (Gemini, Claude, Ollama)";
+  description = "Self-hosted, forge-agnostic AI code review engine";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -15,61 +15,75 @@
         "aarch64-darwin"
       ];
       forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+
+      nixFiles = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./flake.nix
+          ./nix
+        ];
+      };
     in
     {
       packages = forAllSystems (
         pkgs:
         let
-          web = pkgs.buildNpmPackage {
-            pname = "revue-web";
-            version = "0.1.0";
-            src = ./web;
-            # Hashes come from package-lock.json, so Dependabot bumps need no hash update.
-            npmDeps = pkgs.importNpmLock { npmRoot = ./web; };
-            npmConfigHook = pkgs.importNpmLock.npmConfigHook;
-            installPhase = ''
-              mkdir -p $out
-              cp -r build/* $out/
-            '';
-          };
+          revue = pkgs.callPackage ./nix/package.nix { };
         in
         {
-          inherit web;
-          default = pkgs.rustPlatform.buildRustPackage {
-            pname = "revue";
-            version = "0.1.0";
-            src = ./.;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-            };
-            nativeBuildInputs = [ pkgs.pkg-config ];
-            # nixpkgs' cargo hook links libsqlite3-sys to the system sqlite.
-            buildInputs = [ pkgs.sqlite ];
-            postInstall = ''
-              ln -s $out/bin/revue $out/bin/nix-revue
-              mkdir -p $out/share/revue/web
-              cp -r ${web}/* $out/share/revue/web/
-            '';
-            meta = with lib; {
-              description = "Self-hosted, forge-agnostic AI code review engine";
-              homepage = "https://github.com/kleinbem-dev/revue";
-              license = licenses.mit;
-              mainProgram = "revue";
-            };
-          };
+          default = revue;
+          inherit revue;
+          inherit (revue.passthru) web;
+        }
+      );
+
+      checks = forAllSystems (
+        pkgs:
+        let
+          inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) revue web;
+        in
+        {
+          inherit revue web;
+          inherit (revue.passthru.tests) daemon-smoke;
+          nix-lint =
+            pkgs.runCommand "revue-nix-lint"
+              {
+                nativeBuildInputs = [
+                  pkgs.nixfmt
+                  pkgs.statix
+                  pkgs.deadnix
+                ];
+              }
+              ''
+                cd ${nixFiles}
+                nixfmt --check flake.nix nix/package.nix nix/module.nix
+                statix check .
+                deadnix --fail .
+                touch "$out"
+              '';
         }
       );
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            rustc
-            clippy
-            rustfmt
-            rust-analyzer
-            pkg-config
+          packages = [
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.clippy
+            pkgs.rustfmt
+            pkgs.rust-analyzer
+            pkgs.pkg-config
+            pkgs.sqlite
+            pkgs.git
+            pkgs.nodejs
+            pkgs.just
+            pkgs.nixfmt
+            pkgs.statix
+            pkgs.deadnix
           ];
+          env = {
+            LIBSQLITE3_SYS_USE_PKG_CONFIG = "1";
+          };
         };
       });
 

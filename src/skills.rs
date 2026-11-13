@@ -4,6 +4,7 @@ use tracing::debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSummary {
+    pub id: String,
     pub name: String,
     pub description: String,
     pub triggers: Vec<String>,
@@ -17,40 +18,53 @@ pub struct LoadedSkill {
     pub triggers: Vec<String>,
 }
 
-/// Discover the primary fleet skills directory on this host
+/// Discover the primary skills directory on this host via config, env, local path, or XDG/agent dirs.
 pub fn find_skills_dir(configured_path: Option<&str>) -> Option<PathBuf> {
-    if let Some(p) = configured_path {
+    if let Some(p) = configured_path
+        && !p.trim().is_empty()
+    {
         let path = PathBuf::from(p);
         if path.is_dir() {
             return Some(path);
         }
     }
 
-    if let Ok(env_path) = std::env::var("REVUE_SKILLS_DIR") {
+    if let Ok(env_path) = std::env::var("REVUE_SKILLS_DIR")
+        && !env_path.trim().is_empty()
+    {
         let path = PathBuf::from(env_path);
         if path.is_dir() {
             return Some(path);
         }
     }
 
-    // Standard fleet paths
-    let candidate_paths = [
-        "/home/martin/.gemini/config/skills",
-        "/home/martin/Develop/github.com/kleinbem/skills",
-        "./skills",
-    ];
+    let local_skills = PathBuf::from("./skills");
+    if local_skills.is_dir() {
+        return Some(local_skills);
+    }
 
-    for candidate in &candidate_paths {
-        let path = PathBuf::from(candidate);
-        if path.is_dir() {
-            return Some(path);
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.trim().is_empty()
+    {
+        let xdg_skills = PathBuf::from(xdg).join("revue/skills");
+        if xdg_skills.is_dir() {
+            return Some(xdg_skills);
         }
     }
 
-    if let Ok(home) = std::env::var("HOME") {
-        let user_gemini = PathBuf::from(home).join(".gemini/config/skills");
-        if user_gemini.is_dir() {
-            return Some(user_gemini);
+    if let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        let home_path = PathBuf::from(home);
+        for rel in [
+            ".config/revue/skills",
+            ".gemini/config/skills",
+            ".agents/skills",
+        ] {
+            let candidate = home_path.join(rel);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
         }
     }
 
@@ -222,7 +236,13 @@ pub fn list_all_skills(skills_dir: Option<&Path>) -> Vec<SkillSummary> {
         if path.is_dir()
             && let Some(skill) = load_skill_from_dir(&path)
         {
+            let id = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&skill.name)
+                .to_string();
             skills.push(SkillSummary {
+                id,
                 name: skill.name,
                 description: skill.description,
                 triggers: skill.triggers,
@@ -230,7 +250,7 @@ pub fn list_all_skills(skills_dir: Option<&Path>) -> Vec<SkillSummary> {
         }
     }
 
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     skills
 }
 

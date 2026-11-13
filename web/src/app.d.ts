@@ -6,13 +6,16 @@ declare global {
 			message: string;
 			stack?: string;
 		}
-		// interface Locals {}
-		// interface PageData {}
 		interface PageState {
 			selectedReviewId?: string;
 			isTriggerOpen?: boolean;
 		}
-		// interface Platform {}
+	}
+}
+
+declare module 'svelte/elements' {
+	interface HTMLDialogAttributes {
+		closedby?: 'any' | 'closerequest' | 'none';
 	}
 }
 

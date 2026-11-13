@@ -3,17 +3,21 @@
 
 	let { provider }: { provider: ProviderStatus } = $props();
 
-	const isLive = $derived(provider.status === 'active' || provider.status === 'ready');
+	const isConfigured = $derived(
+		provider.status === 'configured' ||
+			provider.status === 'active' ||
+			provider.status === 'ready'
+	);
 </script>
 
-<div class="card" class:active={provider.status === 'active'}>
+<div class="card" class:active={isConfigured} class:unconfigured={provider.status === 'unconfigured'}>
 	<div class="card-header">
 		<div class="title-wrap">
-			<span class="status-indicator {provider.status}"></span>
+			<span class="status-indicator {provider.status}" title="Status: {provider.status}"></span>
 			<h3>{provider.name}</h3>
 		</div>
-		<span class="type-badge {provider.type}">
-			{provider.type === 'subscription' ? '$0 Sub' : provider.type}
+		<span class="type-badge" class:ready={isConfigured}>
+			{provider.type}
 		</span>
 	</div>
 
@@ -25,42 +29,43 @@
 	<div class="card-footer">
 		<div class="stat">
 			<span class="stat-label">Cost:</span>
-			<span class="stat-value free">{provider.cost_per_token}</span>
+			<span class="stat-value" class:free={provider.cost_per_token.startsWith('$0')}>
+				{provider.cost_per_token}
+			</span>
 		</div>
 		<div class="stat">
-			<span class="stat-label">Avg Latency:</span>
-			<span class="stat-value">{provider.latency_avg}</span>
+			<span class="stat-label">Status:</span>
+			<span class="stat-value">{provider.status}</span>
 		</div>
 	</div>
 </div>
 
 <style>
 	.card {
-		background: rgba(15, 23, 42, 0.6);
-		border: 1px solid #1e293b;
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.75rem;
 		padding: 1.15rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.85rem;
-		transition: all 0.2s ease;
-		backdrop-filter: blur(8px);
+		transition: border-color 0.15s ease, transform 0.15s ease;
 	}
 
 	.card:hover {
-		border-color: #334155;
+		border-color: var(--color-outline);
 		transform: translateY(-1px);
 	}
 
-	.card.active {
-		border-color: rgba(139, 92, 246, 0.4);
-		box-shadow: 0 0 15px rgba(139, 92, 246, 0.1);
+	.card.unconfigured {
+		opacity: 0.72;
 	}
 
 	.card-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: 0.5rem;
 	}
 
 	.title-wrap {
@@ -72,7 +77,7 @@
 	h3 {
 		font-size: 0.95rem;
 		font-weight: 600;
-		color: #f1f5f9;
+		color: var(--color-heading);
 		margin: 0;
 	}
 
@@ -80,19 +85,18 @@
 		width: 8px;
 		height: 8px;
 		border-radius: 9999px;
+		background: var(--color-muted);
+		flex-shrink: 0;
 	}
 
-	.status-indicator.active {
-		background: #10b981;
-		box-shadow: 0 0 8px #10b981;
-	}
-
+	.status-indicator.configured,
+	.status-indicator.active,
 	.status-indicator.ready {
-		background: #3b82f6;
+		background: var(--color-status-success);
 	}
 
-	.status-indicator.fallback {
-		background: #f59e0b;
+	.status-indicator.unconfigured {
+		background: var(--color-status-warning);
 	}
 
 	.type-badge {
@@ -100,15 +104,15 @@
 		font-weight: 600;
 		padding: 0.15rem 0.45rem;
 		border-radius: 0.35rem;
-		background: #1e293b;
-		color: #94a3b8;
-		border: 1px solid #334155;
+		background: var(--color-surface-high);
+		color: var(--color-muted);
+		border: 1px solid var(--color-line);
 	}
 
-	.type-badge.subscription {
-		background: rgba(16, 185, 129, 0.1);
-		color: #34d399;
-		border-color: rgba(16, 185, 129, 0.3);
+	.type-badge.ready {
+		background: var(--color-accent-soft);
+		color: var(--color-accent-soft-fg);
+		border-color: transparent;
 	}
 
 	.model-info {
@@ -116,17 +120,16 @@
 		align-items: center;
 		gap: 0.5rem;
 		font-size: 0.8rem;
-		color: #94a3b8;
+		color: var(--color-muted);
 	}
 
 	code {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		font-size: 0.775rem;
-		background: #0f172a;
+		background: var(--color-bg);
 		padding: 0.15rem 0.4rem;
 		border-radius: 0.25rem;
-		border: 1px solid #1e293b;
-		color: #cbd5e1;
+		border: 1px solid var(--color-line);
+		color: var(--color-heading);
 	}
 
 	.card-footer {
@@ -134,7 +137,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding-top: 0.65rem;
-		border-top: 1px solid #1e293b;
+		border-top: 1px solid var(--color-line);
 		font-size: 0.775rem;
 	}
 
@@ -144,15 +147,15 @@
 	}
 
 	.stat-label {
-		color: #64748b;
+		color: var(--color-muted);
 	}
 
 	.stat-value {
 		font-weight: 500;
-		color: #e2e8f0;
+		color: var(--color-fg);
 	}
 
 	.stat-value.free {
-		color: #34d399;
+		color: var(--color-status-success);
 	}
 </style>

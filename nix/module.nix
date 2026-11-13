@@ -10,6 +10,20 @@ let
   cfg = if config.services.revue.enable then config.services.revue else config.services.nix-revue;
   enabled = config.services.revue.enable || config.services.nix-revue.enable;
 
+  userHome =
+    if cfg.user != null && lib.hasAttr cfg.user config.users.users then
+      config.users.users.${cfg.user}.home
+    else
+      "/home/${cfg.user}";
+
+  userGroup =
+    if cfg.group != null then
+      cfg.group
+    else if cfg.user != null && lib.hasAttr cfg.user config.users.users then
+      config.users.users.${cfg.user}.group
+    else
+      "users";
+
   revueModuleOptions = {
     enable = lib.mkEnableOption "revue AI PR code review daemon";
 
@@ -23,39 +37,71 @@ let
     user = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "User to run the daemon as (e.g. 'martin') to access user-level AI subscriptions and tool credentials. If null, runs with DynamicUser.";
+      example = "alice";
+      description = "User to run the daemon as when user-level CLI credentials are required. If null, runs with DynamicUser.";
     };
 
     group = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Group to run the daemon as.";
+      example = "users";
+      description = "Group to run the daemon as when user is set.";
     };
 
     listen = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1:8383";
-      description = "Address and port for the webhook listener.";
+      example = "0.0.0.0:8383";
+      description = "Address and port for the HTTP dashboard and webhook listener.";
     };
 
     configFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "Path to the .revue.yaml configuration file. If null, searches repository root or uses defaults.";
+      example = "/etc/revue/config.yaml";
+      description = "Path to the .revue.yaml configuration file. If null, searches repository root or uses built-in defaults.";
     };
 
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
-      description = "Path to an EnvironmentFile containing secrets (FORGEJO_TOKEN, GEMINI_API_KEY, GITHUB_TOKEN, REVUE_WEBHOOK_SECRET).";
+      example = "/run/secrets/revue.env";
+      description = "EnvironmentFile containing runtime secrets (FORGEJO_TOKEN, GITHUB_TOKEN, GEMINI_API_KEY, REVUE_WEBHOOK_SECRET, REVUE_API_KEY).";
+    };
+
+    databaseUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "sqlite:///var/lib/revue/revue.db?mode=rwc";
+      description = "Optional SQLite or PostgreSQL connection string passed via DATABASE_URL.";
+    };
+
+    workspaceRoot = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      example = "/srv/repos";
+      description = "Optional root directory containing local repository checkouts for tree-context inspection (REVUE_WORKSPACE_ROOT).";
+    };
+
+    skillsDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      example = "/etc/revue/skills";
+      description = "Optional directory of domain SKILL.md review guides (REVUE_SKILLS_DIR).";
     };
 
     persistencePath = lib.mkOption {
       type = lib.types.str;
       default = "/nix/persist";
-      description = "Root path for impermanence persistent storage.";
+      example = "/persist";
+      description = "Root path for impermanence persistent storage when enabled on the host.";
     };
   };
+
+  extraEnv =
+    lib.optional (cfg.databaseUrl != null) "DATABASE_URL=${cfg.databaseUrl}"
+    ++ lib.optional (cfg.workspaceRoot != null) "REVUE_WORKSPACE_ROOT=${toString cfg.workspaceRoot}"
+    ++ lib.optional (cfg.skillsDir != null) "REVUE_SKILLS_DIR=${toString cfg.skillsDir}";
 in
 {
   options.services.revue = revueModuleOptions;
@@ -71,21 +117,32 @@ in
           }
         ];
 
-        systemd.tmpfiles.rules =
-          lib.optionals (cfg.user != null) [
-            "d /home/${cfg.user}/.local/share/revue 0750 ${cfg.user} ${if cfg.group != null then cfg.group else "users"} -"
-          ]
-          ++ lib.optionals (cfg.user == null && options.environment ? persistence) [
-            "d /var/lib/private 0700 root root -"
-            "d ${cfg.persistencePath}/var/lib/private 0700 root root -"
-          ];
+        systemd.tmpfiles.settings."10-revue" =
+          lib.optionalAttrs (cfg.user != null) {
+            "${userHome}/.local/share/revue".d = {
+              inherit (cfg) user;
+              group = userGroup;
+              mode = "0750";
+            };
+          }
+          // lib.optionalAttrs (cfg.user == null && options.environment ? persistence) {
+            "/var/lib/private".d = {
+              user = "root";
+              group = "root";
+              mode = "0700";
+            };
+            "${cfg.persistencePath}/var/lib/private".d = {
+              user = "root";
+              group = "root";
+              mode = "0700";
+            };
+          };
 
         systemd.services.revue = {
           description = "revue AI PR code review webhook daemon";
           after = [ "network.target" ];
           wantedBy = [ "multi-user.target" ];
 
-          # Jujutsu, Git, and Bash are required by revue for repo operations and ephemeral workspaces.
           path = [
             pkgs.git
             pkgs.jujutsu
@@ -96,60 +153,82 @@ in
             "/run/current-system/sw"
           ];
 
-          serviceConfig =
-            {
-              ExecStart =
-                let
-                  configArg = lib.optionalString (cfg.configFile != null) "--config ${cfg.configFile}";
-                in
-                "${lib.getExe cfg.package} ${configArg} daemon --listen ${cfg.listen}";
-              EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
-              Restart = "always";
-              RestartSec = "5s";
-            }
-            // (
-              if cfg.user != null then
-                {
-                  User = cfg.user;
-                  Group = if cfg.group != null then cfg.group else "users";
-                  DynamicUser = false;
-                  ProtectSystem = "strict";
-                  ProtectHome = "read-only";
-                  ReadWritePaths = [
-                    "/home/${cfg.user}/.gemini"
-                    "/home/${cfg.user}/.local/share/revue"
-                  ];
-                  NoNewPrivileges = true;
-                  PrivateTmp = true;
-                  Environment = [
-                    "HOME=/home/${cfg.user}"
-                    "REVUE_DATA_DIR=/home/${cfg.user}/.local/share/revue"
-                  ];
-                }
-              else
-                {
-                  DynamicUser = true;
-                  StateDirectory = "revue";
-                  ProtectSystem = "strict";
-                  ProtectHome = true;
-                  NoNewPrivileges = true;
-                  PrivateTmp = true;
-                  Environment = [
-                    "REVUE_DATA_DIR=/var/lib/revue"
-                  ];
-                }
+          serviceConfig = {
+            ExecStart = lib.escapeShellArgs (
+              [ (lib.getExe cfg.package) ]
+              ++ lib.optionals (cfg.configFile != null) [
+                "--config"
+                (toString cfg.configFile)
+              ]
+              ++ [
+                "daemon"
+                "--listen"
+                cfg.listen
+              ]
             );
+            EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
+            Restart = "always";
+            RestartSec = "5s";
+          }
+          // (
+            if cfg.user != null then
+              {
+                User = cfg.user;
+                Group = userGroup;
+                DynamicUser = false;
+                ProtectSystem = "strict";
+                ProtectHome = "read-only";
+                ReadWritePaths = [
+                  "-${userHome}/.gemini"
+                  "${userHome}/.local/share/revue"
+                ];
+                NoNewPrivileges = true;
+                PrivateTmp = true;
+                Environment = [
+                  "HOME=${userHome}"
+                  "REVUE_DATA_DIR=${userHome}/.local/share/revue"
+                ]
+                ++ extraEnv;
+              }
+            else
+              {
+                DynamicUser = true;
+                StateDirectory = "revue";
+                ProtectSystem = "strict";
+                ProtectHome = true;
+                NoNewPrivileges = true;
+                PrivateTmp = true;
+                Environment = [
+                  "REVUE_DATA_DIR=/var/lib/revue"
+                ]
+                ++ extraEnv;
+              }
+          );
         };
       }
-      # /var is tmpfs on the fleet; persist the state directory across reboots.
-      # A user's state is in their home, which the host persists (or mounts
-      # from disk, where impermanence rejects it). optionalAttrs: hosts
-      # without the impermanence module.
-      (lib.optionalAttrs (options.environment ? persistence) {
-        environment.persistence."${cfg.persistencePath}".directories = lib.optionals (cfg.user == null) [
-          "/var/lib/private/revue"
-        ];
-      })
+      # Persist state on impermanence hosts unless userHome sits on a dedicated persistent /home mount.
+      (lib.optionalAttrs (options.environment ? persistence) (
+        let
+          homeIsPersistentFs =
+            (userHome == "/home" || lib.hasPrefix "/home/" userHome)
+            && (config.fileSystems ? "/home")
+            && (config.fileSystems."/home".fsType or "") != "tmpfs";
+        in
+        {
+          environment.persistence."${cfg.persistencePath}".directories =
+            if cfg.user == null then
+              [ "/var/lib/private/revue" ]
+            else
+              lib.optionals (!homeIsPersistentFs) [
+                {
+                  directory = "${userHome}/.local/share/revue";
+                  inherit (cfg) user;
+                  group = userGroup;
+                  mode = "0750";
+                }
+              ];
+        }
+      ))
     ]
   );
 }

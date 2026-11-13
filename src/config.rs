@@ -58,7 +58,7 @@ pub struct ForgeConfig {
     /// Forge type: "forgejo", "gitea", "github", or "auto"
     #[serde(default = "default_forge_type")]
     pub r#type: String,
-    /// Base URL for the forge (e.g. https://git.kleinbem.dev)
+    /// Base URL for the forge (e.g. https://git.example.com)
     #[serde(default = "default_forge_url")]
     pub url: String,
     /// Generic fallback token (overridden by forgejo_token / github_token)
@@ -80,7 +80,7 @@ fn default_forge_type() -> String {
 }
 
 fn default_forge_url() -> String {
-    std::env::var("FORGEJO_URL").unwrap_or_else(|_| "https://git.kleinbem.dev".to_string())
+    std::env::var("FORGEJO_URL").unwrap_or_default()
 }
 
 impl Default for ForgeConfig {
@@ -111,6 +111,10 @@ pub struct ProvidersConfig {
     pub ollama_model: String,
     #[serde(default = "default_gemini_model")]
     pub gemini_model: String,
+    #[serde(default = "default_openai_url")]
+    pub openai_url: String,
+    #[serde(default = "default_openai_model")]
+    pub openai_model: String,
 }
 
 fn default_cascade() -> Vec<String> {
@@ -143,6 +147,14 @@ fn default_gemini_model() -> String {
     std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.0-flash".to_string())
 }
 
+fn default_openai_url() -> String {
+    std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string())
+}
+
+fn default_openai_model() -> String {
+    std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string())
+}
+
 impl Default for ProvidersConfig {
     fn default() -> Self {
         Self {
@@ -152,6 +164,8 @@ impl Default for ProvidersConfig {
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
             gemini_model: default_gemini_model(),
+            openai_url: default_openai_url(),
+            openai_model: default_openai_model(),
         }
     }
 }
@@ -286,8 +300,14 @@ impl RevueConfig {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config from {:?}", path))?;
 
-        let mut cfg: RevueConfig = serde_yaml::from_str(&content)
+        let mut cfg: RevueConfig = serde_saphyr::from_str(&content)
             .with_context(|| format!("Failed to parse YAML from {:?}", path))?;
+
+        if cfg.forge.url.trim().is_empty()
+            && let Ok(url) = std::env::var("FORGEJO_URL")
+        {
+            cfg.forge.url = url;
+        }
 
         if cfg.forge.github_token.is_none() {
             cfg.forge.github_token = std::env::var("GITHUB_TOKEN").ok();
@@ -333,7 +353,7 @@ impl RevueConfig {
         }
 
         let content = std::fs::read_to_string(path)?;
-        let legacy: LegacyConfig = serde_yaml::from_str(&content)?;
+        let legacy: LegacyConfig = serde_saphyr::from_str(&content)?;
 
         let mut config = Self::default();
 
@@ -351,7 +371,8 @@ impl RevueConfig {
                 for filter in filters {
                     if let Some(negated) = filter.strip_prefix('!') {
                         let trimmed = negated.trim();
-                        if !trimmed.is_empty() && !config.review.ignore.iter().any(|i| i == trimmed) {
+                        if !trimmed.is_empty() && !config.review.ignore.iter().any(|i| i == trimmed)
+                        {
                             config.review.ignore.push(trimmed.to_string());
                         }
                     }
@@ -373,16 +394,15 @@ impl RevueConfig {
 
     /// Generate sample .revue.yaml content
     pub fn default_yaml_template() -> &'static str {
-        r#"# nix-revue configuration
-# Schema version
+        r#"# revue configuration
 version: 1
 
 # Forge configuration
 forge:
-  # "forgejo", "gitea", "github", or "auto" (detected from git remote)
+  # "forgejo", "gitea", "github", or "auto" (detected from git remote / forge.url)
   type: auto
-  # Base URL for Forgejo (used when forge is self-hosted)
-  url: "https://git.kleinbem.dev"
+  # Base URL when using a self-hosted Forgejo or Gitea instance (or set FORGEJO_URL)
+  # url: "https://git.example.com"
   # Webhook HMAC secret for signature verification (or set REVUE_WEBHOOK_SECRET)
   # webhook_secret: "your-shared-secret"
 
@@ -459,9 +479,9 @@ mod tests {
     fn test_parse_native_revue_yaml() {
         let yaml = RevueConfig::default_yaml_template();
         let config: RevueConfig =
-            serde_yaml::from_str(yaml).expect("Template should be valid YAML");
+            serde_saphyr::from_str(yaml).expect("Template should be valid YAML");
         assert_eq!(config.version, 1);
-        assert_eq!(config.forge.url, "https://git.kleinbem.dev");
+        assert_eq!(config.forge.url, default_forge_url());
         assert_eq!(config.providers.cascade.len(), 5);
         assert_eq!(config.providers.cascade[0], "antigravity");
         assert_eq!(config.providers.cascade[1], "mesh-llm");
@@ -492,10 +512,34 @@ reviews:
         assert_eq!(config.review.language, "en-GB");
         assert_eq!(config.review.tone, "Direct and crisp");
         // Preserves default ignores and appends negated filter, ignoring positive include filter
-        assert!(config.review.ignore.contains(&"**/package-lock.json".to_string()));
+        assert!(
+            config
+                .review
+                .ignore
+                .contains(&"**/package-lock.json".to_string())
+        );
         assert!(config.review.ignore.contains(&"**/vendor/**".to_string()));
         assert!(!config.review.ignore.contains(&"src/**/*.rs".to_string()));
         assert_eq!(config.review.rules.len(), 1);
         assert_eq!(config.review.rules[0].instructions, "No plaintext secrets");
+    }
+
+    #[test]
+    fn test_malformed_yaml_and_missing_explicit_path_fail_cleanly() {
+        let bad_dir = std::env::temp_dir().join(format!("revue-bad-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        let bad_file = bad_dir.join("broken.yaml");
+        std::fs::write(&bad_file, "version: [unclosed\n  review: : :\n").unwrap();
+
+        assert!(RevueConfig::find_and_load(Some(bad_file.to_str().unwrap())).is_err());
+        assert!(RevueConfig::find_and_load(Some("/nonexistent/revue-missing.yaml")).is_err());
+
+        let minimal_file = bad_dir.join("minimal.yaml");
+        std::fs::write(&minimal_file, "review:\n  min_severity: error\n").unwrap();
+        let cfg = RevueConfig::find_and_load(Some(minimal_file.to_str().unwrap())).unwrap();
+        assert_eq!(cfg.review.min_severity, "error");
+        assert!(cfg.review.two_pass);
+
+        let _ = std::fs::remove_dir_all(bad_dir);
     }
 }

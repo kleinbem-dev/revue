@@ -5,7 +5,7 @@ use crate::forges::{
 };
 use crate::providers::{
     Provider, ProviderChain, antigravity::AntigravityCliProvider, claude::ClaudeCliProvider,
-    gemini::GeminiProvider, mesh_llm::MeshLlmProvider, ollama::OllamaProvider,
+    gemini::GeminiProvider, openai_compat::OpenAiCompatProvider,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
                 providers.push(Box::new(AntigravityCliProvider::new()));
             }
             "mesh-llm" | "mesh" => {
-                providers.push(Box::new(MeshLlmProvider::create(
+                providers.push(Box::new(OpenAiCompatProvider::mesh_llm(
                     config.providers.mesh_llm_url.clone(),
                     config.providers.mesh_llm_model.clone(),
                 )));
@@ -78,9 +78,17 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
                 }
             }
             "ollama" => {
-                providers.push(Box::new(OllamaProvider::create(
+                providers.push(Box::new(OpenAiCompatProvider::ollama(
                     config.providers.ollama_url.clone(),
                     config.providers.ollama_model.clone(),
+                )));
+            }
+            "openai" | "openai-compat" => {
+                providers.push(Box::new(OpenAiCompatProvider::new(
+                    "OpenAI-Compatible API".to_string(),
+                    config.providers.openai_url.clone(),
+                    config.providers.openai_model.clone(),
+                    std::env::var("OPENAI_API_KEY").ok(),
                 )));
             }
             _ => tracing::warn!("Unknown provider in cascade: {}", name),
@@ -88,6 +96,20 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
     }
 
     ProviderChain::new(providers)
+}
+
+/// Determines whether a repository review targets a Forgejo/Gitea instance rather than GitHub.
+pub fn is_forgejo_target(config: &RevueConfig, repo: &str) -> bool {
+    match config.forge.r#type.trim().to_lowercase().as_str() {
+        "forgejo" | "gitea" => true,
+        "github" => false,
+        _ => {
+            let url = config.forge.url.trim();
+            (!url.is_empty() && !url.contains("github.com"))
+                || repo.contains("git.")
+                || repo.contains("forgejo")
+        }
+    }
 }
 
 fn format_diff_and_context(diff: &ParsedDiff, max_tokens: usize) -> String {
@@ -279,19 +301,28 @@ pub async fn run_semgrep_pass0(
             Some(cfg.clone())
         } else {
             // Local file/directory path that does not exist or cannot be canonicalized
-            tracing::warn!(
-                "Rejecting unresolvable local Semgrep config path: {}",
-                cfg
-            );
+            tracing::warn!("Rejecting unresolvable local Semgrep config path: {}", cfg);
             return Vec::new();
         }
     } else if let Some(trusted) = trusted_rules_root {
         if trusted.join(".semgrep").exists() {
-            trusted.join(".semgrep").canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+            trusted
+                .join(".semgrep")
+                .canonicalize()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
         } else if trusted.join(".semgrep.yml").exists() {
-            trusted.join(".semgrep.yml").canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+            trusted
+                .join(".semgrep.yml")
+                .canonicalize()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
         } else if trusted.join(".semgrep.yaml").exists() {
-            trusted.join(".semgrep.yaml").canonicalize().ok().map(|p| p.to_string_lossy().to_string())
+            trusted
+                .join(".semgrep.yaml")
+                .canonicalize()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
         } else {
             None
         }
@@ -486,22 +517,20 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
                 s.push_str(&format!("- Target Repository: `{}`\n", meta.repo));
             }
         }
+        let clean_head = inline_untrusted(&crate::scrubber::scrub_text(&meta.head_ref));
+        let clean_base = inline_untrusted(&crate::scrubber::scrub_text(&meta.base_ref));
         match (!meta.head_ref.is_empty(), !meta.base_ref.is_empty()) {
             (true, true) => {
                 s.push_str(&format!(
                     "- Branches: `{}` → `{}`\n",
-                    inline_untrusted(&meta.head_ref),
-                    inline_untrusted(&meta.base_ref)
+                    clean_head, clean_base
                 ));
             }
             (true, false) => {
-                s.push_str(&format!(
-                    "- Source Branch: `{}`\n",
-                    inline_untrusted(&meta.head_ref)
-                ));
+                s.push_str(&format!("- Source Branch: `{}`\n", clean_head));
             }
             (false, true) => {
-                s.push_str(&format!("- Base Branch: `{}`\n", meta.base_ref));
+                s.push_str(&format!("- Base Branch: `{}`\n", clean_base));
             }
             (false, false) if !meta.head_sha.is_empty() => {
                 s.push_str(&format!(
@@ -519,10 +548,18 @@ fn format_intent(intent: Option<&PrMetadata>) -> String {
             inline_untrusted(&crate::scrubber::scrub_text(&meta.title))
         ));
         if !meta.author.is_empty() {
-            s.push_str(&format!("- Author: {}\n", meta.author));
+            s.push_str(&format!(
+                "- Author: {}\n",
+                inline_untrusted(&crate::scrubber::scrub_text(&meta.author))
+            ));
         }
         if !meta.labels.is_empty() {
-            s.push_str(&format!("- Labels: {}\n", meta.labels.join(", ")));
+            let clean_labels: Vec<String> = meta
+                .labels
+                .iter()
+                .map(|l| inline_untrusted(&crate::scrubber::scrub_text(l)))
+                .collect();
+            s.push_str(&format!("- Labels: {}\n", clean_labels.join(", ")));
         }
         if !meta.description.trim().is_empty() {
             let clean_desc = truncate_chars(
@@ -576,17 +613,19 @@ pub fn load_repo_guidelines(
     None
 }
 
-/// Generates the Pass 1 Detective prompt for broad defect discovery.
-pub fn generate_pass1_detective_prompt(
+struct PromptSections {
+    rules_text: String,
+    skills_text: String,
+    code_content: String,
+    intent_text: String,
+}
+
+fn build_prompt_sections(
     diff: &ParsedDiff,
     config: &RevueConfig,
-    pass0_findings: &[ReviewIssue],
     intent: Option<&PrMetadata>,
     repo_guidelines: Option<&str>,
-) -> String {
-    config
-        .validate()
-        .expect("config must be valid before prompt generation");
+) -> PromptSections {
     let mut rules_text = String::new();
     if let Some(guidelines) = repo_guidelines {
         rules_text.push_str("REPOSITORY GUIDELINES (from repository AGENTS.md / rules):\n");
@@ -602,29 +641,62 @@ pub fn generate_pass1_detective_prompt(
     if rules_text.is_empty() {
         rules_text.push_str("(No custom repository rules configured)\n");
     }
-    let skills_text = get_skills_block(diff, config);
-    let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
-    let intent_text = format_intent(intent);
-
-    let mut pass0_text = String::new();
-    if !pass0_findings.is_empty() {
-        pass0_text.push_str("\nDETERMINISTIC AST RULES (PASS 0 FINDINGS):\n");
-        pass0_text.push_str("Static AST analysis (Semgrep) deterministically flagged the following rule violations in modified code:\n");
-        for finding in pass0_findings {
-            pass0_text.push_str(&format!(
-                "- [{}] `{}:{}` - {}: {}\n",
-                finding.severity.to_uppercase(),
-                finding.file,
-                finding.line,
-                finding.title,
-                finding.comment
-            ));
-            if let Some(sugg) = &finding.suggestion {
-                pass0_text.push_str(&format!("  Suggested Fix: {}\n", sugg.trim()));
-            }
-        }
-        pass0_text.push_str("Incorporate these verified findings into your analysis and investigate if any cascading or related defects exist.\n");
+    let budget = config.review.max_diff_tokens.max(10);
+    PromptSections {
+        rules_text,
+        skills_text: get_skills_block(diff, config),
+        code_content: format_diff_and_context(diff, budget),
+        intent_text: format_intent(intent),
     }
+}
+
+fn format_pass0_block(pass0_findings: &[ReviewIssue], trailing_note: Option<&str>) -> String {
+    if pass0_findings.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\nDETERMINISTIC AST RULES (PASS 0 FINDINGS):\n\
+         Static AST analysis (Semgrep) deterministically flagged the following rule violations in modified code:\n",
+    );
+    for finding in pass0_findings {
+        out.push_str(&format!(
+            "- [{}] `{}:{}` - {}: {}\n",
+            finding.severity.to_uppercase(),
+            finding.file,
+            finding.line,
+            finding.title,
+            finding.comment
+        ));
+        if let Some(sugg) = &finding.suggestion {
+            out.push_str(&format!("  Suggested Fix: {}\n", sugg.trim()));
+        }
+    }
+    if let Some(note) = trailing_note {
+        out.push_str(note);
+    }
+    out
+}
+
+/// Generates the Pass 1 Detective prompt for broad defect discovery.
+pub fn generate_pass1_detective_prompt(
+    diff: &ParsedDiff,
+    config: &RevueConfig,
+    pass0_findings: &[ReviewIssue],
+    intent: Option<&PrMetadata>,
+    repo_guidelines: Option<&str>,
+) -> String {
+    let PromptSections {
+        rules_text,
+        skills_text,
+        code_content,
+        intent_text,
+    } = build_prompt_sections(diff, config, intent, repo_guidelines);
+    let pass0_text = format_pass0_block(
+        pass0_findings,
+        Some(
+            "Incorporate these verified findings into your analysis and investigate if any cascading or related defects exist.\n",
+        ),
+    );
 
     format!(
         r#"{PROMPT_PREAMBLE}
@@ -702,48 +774,19 @@ pub fn generate_pass2_judge_prompt(
     comments: &[crate::forges::DiscussionComment],
     repo_guidelines: Option<&str>,
 ) -> String {
-    config
-        .validate()
-        .expect("config must be valid before prompt generation");
     let tone = &config.review.tone;
-    let mut rules_text = String::new();
-    if let Some(guidelines) = repo_guidelines {
-        rules_text.push_str("REPOSITORY GUIDELINES (from repository AGENTS.md / rules):\n");
-        rules_text.push_str(guidelines);
-        rules_text.push_str("\n\nCONFIGURED REVIEW RULES:\n");
-    }
-    for rule in &config.review.rules {
-        rules_text.push_str(&format!(
-            "- For files matching `{}`: {}\n",
-            rule.path, rule.instructions
-        ));
-    }
-    if rules_text.is_empty() {
-        rules_text.push_str("(No custom repository rules configured)\n");
-    }
-    let skills_text = get_skills_block(diff, config);
-    let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
-    let intent_text = format_intent(intent);
-
-    let mut pass0_text = String::new();
-    if !pass0_findings.is_empty() {
-        pass0_text.push_str("\nDETERMINISTIC AST RULES (PASS 0 FINDINGS):\n");
-        pass0_text.push_str("Static AST analysis (Semgrep) flagged the following rule violations in modified code:\n");
-        for finding in pass0_findings {
-            pass0_text.push_str(&format!(
-                "- [{}] `{}:{}` - {}: {}\n",
-                finding.severity.to_uppercase(),
-                finding.file,
-                finding.line,
-                finding.title,
-                finding.comment
-            ));
-            if let Some(sugg) = &finding.suggestion {
-                pass0_text.push_str(&format!("  Suggested Fix: {}\n", sugg.trim()));
-            }
-        }
-        pass0_text.push_str("Evaluate whether these AST findings represent genuine actionable issues in this context, or if they are mitigated/false positives.\n");
-    }
+    let PromptSections {
+        rules_text,
+        skills_text,
+        code_content,
+        intent_text,
+    } = build_prompt_sections(diff, config, intent, repo_guidelines);
+    let pass0_text = format_pass0_block(
+        pass0_findings,
+        Some(
+            "Evaluate whether these AST findings represent genuine actionable issues in this context, or if they are mitigated/false positives.\n",
+        ),
+    );
 
     let mut fp_text = String::new();
     if !false_positives.is_empty() {
@@ -752,10 +795,14 @@ pub fn generate_pass2_judge_prompt(
         for item in false_positives {
             fp_text.push_str(&format!(
                 "- In `{}`: \"{}\"",
-                item.file_path, item.issue_title
+                inline_untrusted(&crate::scrubber::scrub_text(&item.file_path)),
+                inline_untrusted(&crate::scrubber::scrub_text(&item.issue_title)),
             ));
             if let Some(reason) = &item.reason {
-                fp_text.push_str(&format!(" (Reason: {})", reason));
+                fp_text.push_str(&format!(
+                    " (Reason: {})",
+                    inline_untrusted(&crate::scrubber::scrub_text(reason))
+                ));
             }
             fp_text.push('\n');
         }
@@ -825,47 +872,14 @@ pub fn generate_single_pass_prompt(
     intent: Option<&PrMetadata>,
     repo_guidelines: Option<&str>,
 ) -> String {
-    config
-        .validate()
-        .expect("config must be valid before prompt generation");
     let tone = &config.review.tone;
-    let mut rules_text = String::new();
-    if let Some(guidelines) = repo_guidelines {
-        rules_text.push_str("REPOSITORY GUIDELINES (from repository AGENTS.md / rules):\n");
-        rules_text.push_str(guidelines);
-        rules_text.push_str("\n\nCONFIGURED REVIEW RULES:\n");
-    }
-    for rule in &config.review.rules {
-        rules_text.push_str(&format!(
-            "- For files matching `{}`: {}\n",
-            rule.path, rule.instructions
-        ));
-    }
-    if rules_text.is_empty() {
-        rules_text.push_str("(No custom repository rules configured)\n");
-    }
-    let skills_text = get_skills_block(diff, config);
-    let code_content = format_diff_and_context(diff, config.review.max_diff_tokens);
-    let intent_text = format_intent(intent);
-
-    let mut pass0_text = String::new();
-    if !pass0_findings.is_empty() {
-        pass0_text.push_str("\nDETERMINISTIC AST RULES (PASS 0 FINDINGS):\n");
-        pass0_text.push_str("Static AST analysis (Semgrep) deterministically flagged the following rule violations in modified code:\n");
-        for finding in pass0_findings {
-            pass0_text.push_str(&format!(
-                "- [{}] `{}:{}` - {}: {}\n",
-                finding.severity.to_uppercase(),
-                finding.file,
-                finding.line,
-                finding.title,
-                finding.comment
-            ));
-            if let Some(sugg) = &finding.suggestion {
-                pass0_text.push_str(&format!("  Suggested Fix: {}\n", sugg.trim()));
-            }
-        }
-    }
+    let PromptSections {
+        rules_text,
+        skills_text,
+        code_content,
+        intent_text,
+    } = build_prompt_sections(diff, config, intent, repo_guidelines);
+    let pass0_text = format_pass0_block(pass0_findings, None);
 
     format!(
         r#"{PROMPT_PREAMBLE}
@@ -961,18 +975,28 @@ pub async fn execute_review_pipeline(
         );
     }
 
+    // Suppress any Pass 0 AST finding that engineers previously dismissed as a false positive.
+    let active_pass0: Vec<ReviewIssue> = pass0_issues
+        .into_iter()
+        .filter(|issue| {
+            !false_positives
+                .iter()
+                .any(|fp| fp.file_path == issue.file && fp.issue_title == issue.title)
+        })
+        .collect();
+
     if !config.review.two_pass {
         info!("Running single-pass review pipeline");
         let prompt = generate_single_pass_prompt(
             diff,
             config,
-            &pass0_issues,
+            &active_pass0,
             intent,
             repo_guidelines.as_deref(),
         );
         let (resp, prov) = chain.complete_with_fallback(&prompt).await?;
         let mut parsed = parse_review_response(&resp)?;
-        merge_pass0_findings(&mut parsed, pass0_issues);
+        merge_pass0_findings(&mut parsed, active_pass0);
         let raw_count = parsed.issues.len();
         filter_issues(&mut parsed.issues, config);
         let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -991,7 +1015,7 @@ pub async fn execute_review_pipeline(
     let pass1_prompt = generate_pass1_detective_prompt(
         diff,
         config,
-        &pass0_issues,
+        &active_pass0,
         intent,
         repo_guidelines.as_deref(),
     );
@@ -999,7 +1023,8 @@ pub async fn execute_review_pipeline(
     let candidates_count = pass1_candidates
         .lines()
         .filter(|l| l.starts_with("- ") || l.starts_with("* "))
-        .count();
+        .count()
+        + active_pass0.len();
 
     info!("Executing Review Pass 2 (Judge - verification & confidence filtering)...");
     let pass2_prompt = generate_pass2_judge_prompt(
@@ -1007,7 +1032,7 @@ pub async fn execute_review_pipeline(
         config,
         &pass1_candidates,
         false_positives,
-        &pass0_issues,
+        &active_pass0,
         intent,
         existing_comments,
         repo_guidelines.as_deref(),
@@ -1015,6 +1040,7 @@ pub async fn execute_review_pipeline(
     let (pass2_response, _) = chain.complete_with_fallback(&pass2_prompt).await?;
 
     let mut review = parse_review_response(&pass2_response)?;
+    merge_pass0_findings(&mut review, active_pass0);
     filter_issues(&mut review.issues, config);
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -1289,14 +1315,8 @@ pub async fn run_pr_review(
     let config = RevueConfig::find_and_load(config_path)?;
     let repo = repo_arg.ok_or_else(|| anyhow!("--repo is required for PR review"))?;
 
-    let is_forgejo = if config.forge.r#type == "forgejo" {
-        true
-    } else if config.forge.r#type == "github" {
-        false
-    } else {
-        // "auto": determine from repo name or explicitly configured forgejo URL
-        repo.contains("git.") || repo.contains("forgejo")
-    };
+    let is_forgejo = is_forgejo_target(&config, repo);
+    let forge_type = config.forge.r#type.trim().to_ascii_lowercase();
 
     let forge: Box<dyn Forge> = if is_forgejo {
         let token = config
@@ -1305,7 +1325,7 @@ pub async fn run_pr_review(
             .clone()
             .or_else(|| std::env::var("FORGEJO_TOKEN").ok())
             .or_else(|| {
-                if config.forge.r#type == "forgejo" || config.forge.r#type == "gitea" {
+                if forge_type == "forgejo" || forge_type == "gitea" {
                     config.forge.token.clone()
                 } else {
                     None
@@ -1319,7 +1339,7 @@ pub async fn run_pr_review(
             .clone()
             .or_else(|| std::env::var("GITHUB_TOKEN").ok())
             .or_else(|| {
-                if config.forge.r#type == "github" {
+                if forge_type == "github" {
                     config.forge.token.clone()
                 } else {
                     None
@@ -1329,13 +1349,19 @@ pub async fn run_pr_review(
     };
 
     info!("Fetching PR #{} metadata and intent for {}", index, repo);
-    let mut metadata = forge.fetch_pr_metadata(repo, index).await.unwrap_or_else(|e| {
-        tracing::warn!("Failed to fetch PR metadata (intent will be omitted): {}", e);
-        PrMetadata {
-            title: format!("PR #{}", index),
-            ..Default::default()
-        }
-    });
+    let mut metadata = forge
+        .fetch_pr_metadata(repo, index)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to fetch PR metadata (intent will be omitted): {}",
+                e
+            );
+            PrMetadata {
+                title: format!("PR #{}", index),
+                ..Default::default()
+            }
+        });
     if metadata.repo.is_empty() {
         metadata.repo = repo.to_string();
     }
@@ -1491,7 +1517,7 @@ pub async fn run_pr_review(
     };
 
     let summary = format!(
-        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`) — {} #{}\n\n{}---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Repository:** `{}`\n- **Pull Request:** #{}\n{}{}- **Target Head:** `{}`\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** Revue v0.1.0\n</details>",
+        "<!-- revue-ai-generated:v1 -->\n## 🔍 Revue Code Analysis (`{}`) — {} #{}\n\n{}---\n<details>\n<summary><b>📋 Verification & Review Details</b></summary>\n\n- **Repository:** `{}`\n- **Pull Request:** #{}\n{}{}- **Target Head:** `{}`\n- **Inspected Files:** {}\n- **Actionable Issues Flagged:** {}\n- **Review Pipeline:** {}\n- **Engine:** {}\n</details>",
         res.provider_used,
         repo,
         index,
@@ -1503,7 +1529,8 @@ pub async fn run_pr_review(
         head_sha_display,
         parsed.files.len(),
         inline_comments.len(),
-        pipeline_desc
+        pipeline_desc,
+        concat!("Revue v", env!("CARGO_PKG_VERSION")),
     );
 
     if dry_run {
@@ -1924,7 +1951,8 @@ And here is the JSON review output:
 
     #[test]
     fn test_load_repo_guidelines_pr_mode_rejects_untrusted_repo_path() {
-        let temp_dir = std::env::temp_dir().join(format!("test-guidelines-untrusted-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test-guidelines-untrusted-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let agent_file = temp_dir.join("AGENTS.md");
         std::fs::write(&agent_file, "malicious instructions").unwrap();
@@ -1938,7 +1966,8 @@ And here is the JSON review output:
         assert_eq!(loaded_local.as_deref(), Some("malicious instructions"));
 
         // When trusted_rules_root is provided, PR mode loads from it
-        let trusted_dir = std::env::temp_dir().join(format!("test-guidelines-trusted-{}", std::process::id()));
+        let trusted_dir =
+            std::env::temp_dir().join(format!("test-guidelines-trusted-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&trusted_dir);
         let trusted_file = trusted_dir.join("AGENTS.md");
         std::fs::write(&trusted_file, "trusted instructions").unwrap();
@@ -1951,7 +1980,8 @@ And here is the JSON review output:
 
     #[test]
     fn test_load_repo_guidelines_safe_utf8_truncation() {
-        let temp_dir = std::env::temp_dir().join(format!("test-guidelines-utf8-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test-guidelines-utf8-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let agent_file = temp_dir.join("AGENTS.md");
         // Create > 3000 chars of multi-byte UTF-8 emojis/characters
@@ -2103,5 +2133,23 @@ And here is the JSON review output:
         let recent = db.list_recent_reviews(10).await.unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].summary, NO_REVIEWABLE_CHANGES);
+    }
+
+    #[test]
+    fn test_is_forgejo_target_detection() {
+        let mut cfg = RevueConfig::default();
+        cfg.forge.url.clear();
+        assert!(!is_forgejo_target(&cfg, "owner/repo"));
+        assert!(is_forgejo_target(&cfg, "git.example.com/owner/repo"));
+
+        cfg.forge.url = "https://git.example.com".to_string();
+        assert!(is_forgejo_target(&cfg, "owner/repo"));
+
+        cfg.forge.r#type = "github".to_string();
+        assert!(!is_forgejo_target(&cfg, "owner/repo"));
+
+        cfg.forge.r#type = "gitea".to_string();
+        cfg.forge.url.clear();
+        assert!(is_forgejo_target(&cfg, "owner/repo"));
     }
 }
