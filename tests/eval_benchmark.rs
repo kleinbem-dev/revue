@@ -101,7 +101,10 @@ impl Provider for ReplayProvider {
 ```"#,
                 self.fixture.expected_file,
                 self.fixture.expected_file,
-                self.fixture.expected_min_severity.as_deref().unwrap_or("warning"),
+                self.fixture
+                    .expected_min_severity
+                    .as_deref()
+                    .unwrap_or("warning"),
                 self.fixture.name,
                 self.fixture.description,
             ));
@@ -143,7 +146,10 @@ fn test_eval_benchmark_fixtures_load_and_parse() {
 
             if !fixture.expected_file.is_empty() {
                 assert!(
-                    parsed.files.iter().any(|f| f.new_path == fixture.expected_file),
+                    parsed
+                        .files
+                        .iter()
+                        .any(|f| f.new_path == fixture.expected_file),
                     "fixture {} expected file {} in diff",
                     fixture.id,
                     fixture.expected_file
@@ -154,7 +160,11 @@ fn test_eval_benchmark_fixtures_load_and_parse() {
         }
     }
 
-    assert!(count >= 5, "expected at least 5 benchmark fixtures, found {}", count);
+    assert!(
+        count >= 5,
+        "expected at least 5 benchmark fixtures, found {}",
+        count
+    );
 }
 
 /// Runs the deterministic offline replay benchmark measuring recall, trap rejection, and precision.
@@ -216,9 +226,15 @@ async fn test_eval_benchmark_pipeline_replay_scorecard() {
             let dismissed = findings_on_target == 0;
             if dismissed {
                 rejected_traps += 1;
-                println!("  ✔ [TRAP DISMISSED]  {:<35} -> 0 issues (correctly suppressed)", fixture.id);
+                println!(
+                    "  ✔ [TRAP DISMISSED]  {:<35} -> 0 issues (correctly suppressed)",
+                    fixture.id
+                );
             } else {
-                println!("  ❌ [TRAP LEAKED]     {:<35} -> {} issues flagged (false positive!)", fixture.id, findings_on_target);
+                println!(
+                    "  ❌ [TRAP LEAKED]     {:<35} -> {} issues flagged (false positive!)",
+                    fixture.id, findings_on_target
+                );
             }
         } else {
             total_true_positives += 1;
@@ -233,7 +249,10 @@ async fn test_eval_benchmark_pipeline_replay_scorecard() {
                     top_issue.confidence.unwrap_or(0)
                 );
             } else {
-                println!("  ❌ [BUG MISSED]      {:<35} -> 0 findings on target file", fixture.id);
+                println!(
+                    "  ❌ [BUG MISSED]      {:<35} -> 0 findings on target file",
+                    fixture.id
+                );
             }
         }
     }
@@ -259,14 +278,23 @@ async fn test_eval_benchmark_pipeline_replay_scorecard() {
     println!("\n----------------------- EVALUATION SCORECARD -----------------------");
     println!("  True Positive Bugs Evaluated:  {}", total_true_positives);
     println!("  False-Positive Traps Tested:   {}", total_traps);
-    println!("  Recall (Bug Detection):        {:.1}% ({}/{})", recall, detected_true_positives, total_true_positives);
-    println!("  Trap Rejection (Adversarial):  {:.1}% ({}/{})", trap_rejection, rejected_traps, total_traps);
+    println!(
+        "  Recall (Bug Detection):        {:.1}% ({}/{})",
+        recall, detected_true_positives, total_true_positives
+    );
+    println!(
+        "  Trap Rejection (Adversarial):  {:.1}% ({}/{})",
+        trap_rejection, rejected_traps, total_traps
+    );
     println!("  Precision:                     {:.1}%", precision);
     println!("  Token Cost:                    $0.00 (Deterministic Replay)");
     println!("====================================================================\n");
 
     assert_eq!(recall, 100.0, "Recall must be 100% on replay benchmark");
-    assert_eq!(trap_rejection, 100.0, "Trap rejection must be 100% on replay benchmark");
+    assert_eq!(
+        trap_rejection, 100.0,
+        "Trap rejection must be 100% on replay benchmark"
+    );
 }
 
 /// Live Ollama evaluation test against local fleet GPU.
@@ -275,10 +303,14 @@ async fn test_eval_benchmark_pipeline_replay_scorecard() {
 #[tokio::test]
 #[ignore]
 async fn test_eval_live_ollama_benchmark() {
-    let endpoint = std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    let endpoint =
+        std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
     let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5-coder:14b".to_string());
 
-    println!("Testing connectivity to local Ollama at {} (model: {})...", endpoint, model);
+    println!(
+        "Testing connectivity to local Ollama at {} (model: {})...",
+        endpoint, model
+    );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
@@ -288,12 +320,18 @@ async fn test_eval_live_ollama_benchmark() {
     let health_check = match client.get(&health_url).send().await {
         Ok(resp) => resp.error_for_status(),
         Err(e) => {
-            println!("  [SKIPPED] Local Ollama is unreachable at {}: {}. Skipping live benchmark cleanly.", endpoint, e);
+            println!(
+                "  [SKIPPED] Local Ollama is unreachable at {}: {}. Skipping live benchmark cleanly.",
+                endpoint, e
+            );
             return;
         }
     };
     if let Err(e) = health_check {
-        println!("  [SKIPPED] Local Ollama returned non-success status at {}: {}. Skipping live benchmark cleanly.", endpoint, e);
+        println!(
+            "  [SKIPPED] Local Ollama returned non-success status at {}: {}. Skipping live benchmark cleanly.",
+            endpoint, e
+        );
         return;
     }
 
@@ -321,10 +359,12 @@ async fn test_eval_live_ollama_benchmark() {
         config.review.two_pass = true;
         config.review.semgrep = false;
 
-        let provider = Box::new(revue::providers::ollama::OllamaProvider::create(
-            endpoint.clone(),
-            model.clone(),
-        ));
+        let provider = Box::new(
+            revue::providers::openai_compat::OpenAiCompatProvider::ollama(
+                endpoint.clone(),
+                model.clone(),
+            ),
+        );
         let chain = ProviderChain::new(vec![provider]);
 
         match execute_review_pipeline(
@@ -340,15 +380,23 @@ async fn test_eval_live_ollama_benchmark() {
         .await
         {
             Ok(res) => {
-                let is_trap = fixture.expected_type == "false_positive_trap" || fixture.expected_dismissal;
-                let target_issues = res.issues.iter().filter(|i| i.file == fixture.expected_file).count();
+                let is_trap =
+                    fixture.expected_type == "false_positive_trap" || fixture.expected_dismissal;
+                let target_issues = res
+                    .issues
+                    .iter()
+                    .filter(|i| i.file == fixture.expected_file)
+                    .count();
                 if is_trap {
                     traps += 1;
                     if target_issues == 0 {
                         rejected += 1;
                         println!("  ✔ [LIVE TRAP DISMISSED] {:<30}", fixture.id);
                     } else {
-                        println!("  ❌ [LIVE TRAP LEAKED]    {:<30} ({} issues)", fixture.id, target_issues);
+                        println!(
+                            "  ❌ [LIVE TRAP LEAKED]    {:<30} ({} issues)",
+                            fixture.id, target_issues
+                        );
                     }
                 } else {
                     true_positives += 1;
@@ -362,7 +410,10 @@ async fn test_eval_live_ollama_benchmark() {
             }
             Err(e) => {
                 inference_errors += 1;
-                println!("  ⚠️ [ERROR] Live inference failed for {}: {}", fixture.id, e);
+                println!(
+                    "  ⚠️ [ERROR] Live inference failed for {}: {}",
+                    fixture.id, e
+                );
             }
         }
     }

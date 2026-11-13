@@ -1,4 +1,6 @@
-export type Severity = 'critical' | 'error' | 'warning' | 'info';
+import type { CanonicalSeverity } from './review-utils.js';
+
+export type Severity = CanonicalSeverity;
 
 export interface Finding {
 	file: string;
@@ -31,7 +33,6 @@ export interface ReviewRecord {
 	findings: Finding[];
 	lines_added?: number;
 	lines_removed?: number;
-	executive_summary?: string;
 	triage_status?: 'now' | 'next';
 	risk_level?: 'low' | 'medium' | 'high';
 }
@@ -57,10 +58,9 @@ export interface DaemonMetrics {
 
 export interface WizardConfig {
 	profile: 'quiet' | 'chill' | 'assertive';
-	auto_approvals?: boolean;
-	max_merge_risk: 'low' | 'medium' | 'high';
 	high_level_summary: boolean;
 	anti_slop: boolean;
+	semgrep: boolean;
 	ignore_lockfiles: boolean;
 	ignore_vendor: boolean;
 	ignore_generated: boolean;

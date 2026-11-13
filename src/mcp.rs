@@ -2,7 +2,7 @@ use crate::config::RevueConfig;
 use crate::reviewer::review_diff_content;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Deserialize, Debug)]

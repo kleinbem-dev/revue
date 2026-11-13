@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use tracing::{info, warn};
 
@@ -6,8 +6,6 @@ pub mod antigravity;
 pub mod claude;
 pub mod cli;
 pub mod gemini;
-pub mod mesh_llm;
-pub mod ollama;
 pub mod openai_compat;
 
 #[async_trait]

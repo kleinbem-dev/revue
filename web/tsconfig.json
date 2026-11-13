@@ -8,9 +8,7 @@
 		]
 	},
 	"include": [
-		"src",
-		"test",
-		"*"
+		"src"
 	],
 	"exclude": [
 		"src/service-worker"

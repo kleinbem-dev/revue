@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -85,12 +85,14 @@ pub fn build_synthesizer_prompt(
 ) -> String {
     let lang = detect_language_from_path(file_path);
     fn esc(s: &str) -> String {
-        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
     let safe_file = esc(file_path);
-    let safe_title = esc(title);
-    let safe_comment = esc(comment);
-    let safe_snippet = esc(snippet.unwrap_or("").trim());
+    let safe_title = esc(&crate::scrubber::scrub_text(title));
+    let safe_comment = esc(&crate::scrubber::scrub_text(comment));
+    let safe_snippet = esc(&crate::scrubber::scrub_text(snippet.unwrap_or("").trim()));
 
     let snippet_block = if !safe_snippet.is_empty() {
         format!("<finding_code>\n{}\n</finding_code>", safe_snippet)
@@ -121,73 +123,67 @@ Requirements:
     )
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SemgrepRuleFile {
+    rules: Vec<serde_json::Value>,
+}
+
 /// Extracts and validates a single Semgrep rule YAML block from raw LLM output.
 pub fn extract_yaml_block(raw_llm_response: &str) -> Result<(String, String)> {
     let text = raw_llm_response.trim();
 
-    // Extract inside ```yaml ... ``` or ``` ... ```
     let yaml_candidate = if let Some(start) = text.find("```yaml") {
         let content_start = start + 7;
-        if let Some(end) = text[content_start..].find("```") {
-            &text[content_start..content_start + end]
-        } else {
-            &text[content_start..]
-        }
+        text[content_start..]
+            .find("```")
+            .map_or(&text[content_start..], |end| {
+                &text[content_start..content_start + end]
+            })
     } else if let Some(start) = text.find("```") {
         let content_start = start + 3;
-        let newline_offset = text[content_start..].find('\n').unwrap_or(0);
-        let real_start = content_start + newline_offset;
-        if let Some(end) = text[real_start..].find("```") {
-            &text[real_start..real_start + end]
-        } else {
-            &text[real_start..]
-        }
+        let real_start = content_start + text[content_start..].find('\n').unwrap_or(0);
+        text[real_start..]
+            .find("```")
+            .map_or(&text[real_start..], |end| {
+                &text[real_start..real_start + end]
+            })
     } else {
         text
     }
     .trim();
 
-    // Parse with serde_yaml to validate structure
-    let parsed: serde_yaml::Value =
-        serde_yaml::from_str(yaml_candidate).context("Generated LLM response is not valid YAML")?;
+    let parsed: SemgrepRuleFile = serde_saphyr::from_str(yaml_candidate).context(
+        "Generated LLM response is not valid Semgrep YAML with a top-level 'rules' list",
+    )?;
 
-    let rules_seq = parsed
-        .get("rules")
-        .and_then(|r| r.as_sequence())
-        .ok_or_else(|| anyhow!("YAML must contain a top-level 'rules' list"))?;
-
-    if rules_seq.len() != 1 {
+    if parsed.rules.len() != 1 {
         return Err(anyhow!(
             "YAML must contain exactly one rule in the 'rules' list (found {})",
-            rules_seq.len()
+            parsed.rules.len()
         ));
     }
 
-    let first_rule = &rules_seq[0];
+    let first_rule = &parsed.rules[0];
     let rule_id = first_rule
         .get("id")
         .and_then(|id| id.as_str())
         .ok_or_else(|| anyhow!("Rule entry must contain an 'id' string"))?
         .to_string();
 
-    let rule_msg = first_rule.get("message").and_then(|m| m.as_str());
-    if rule_msg.is_none() {
+    if first_rule.get("message").and_then(|m| m.as_str()).is_none() {
         return Err(anyhow!("Rule entry must contain a 'message' string"));
     }
 
-    // Ensure pattern directives exist
-    let has_pattern = first_rule.get("pattern").is_some()
-        || first_rule.get("patterns").is_some()
-        || first_rule.get("pattern-either").is_some()
-        || first_rule.get("pattern-regex").is_some();
-
+    let has_pattern = ["pattern", "patterns", "pattern-either", "pattern-regex"]
+        .iter()
+        .any(|k| first_rule.get(*k).is_some());
     if !has_pattern {
         return Err(anyhow!(
             "Rule entry must contain a pattern directive ('pattern', 'patterns', 'pattern-either', or 'pattern-regex')"
         ));
     }
 
-    let clean_yaml = serde_yaml::to_string(&parsed)?;
+    let clean_yaml = serde_saphyr::to_string(&parsed)?;
     Ok((rule_id, clean_yaml))
 }
 
@@ -261,56 +257,36 @@ pub async fn append_learned_rule_to_repo(
 
     let rules_file = semgrep_dir.join("learned-rules.yaml");
 
-    let parsed_new: serde_yaml::Value = serde_yaml::from_str(new_yaml_str)
+    let parsed_new: SemgrepRuleFile = serde_saphyr::from_str(new_yaml_str)
         .context("Failed to parse newly synthesized rule YAML")?;
 
-    let new_rules = parsed_new
-        .get("rules")
-        .and_then(|r| r.as_sequence())
-        .ok_or_else(|| anyhow!("New rule missing 'rules' list"))?;
-
-    let merged_value = if rules_file.exists() {
+    let merged = if rules_file.exists() {
         let existing_content = tokio::fs::read_to_string(&rules_file)
             .await
             .context("Failed to read existing learned-rules.yaml")?;
 
-        let mut existing_val: serde_yaml::Value = serde_yaml::from_str(&existing_content)
+        let mut existing: SemgrepRuleFile = serde_saphyr::from_str(&existing_content)
             .context("Failed to parse existing learned-rules.yaml")?;
 
-        let mapping = existing_val
-            .as_mapping_mut()
-            .ok_or_else(|| anyhow!("Existing learned-rules.yaml root is not a mapping"))?;
-
-        let rules_key = serde_yaml::Value::String("rules".to_string());
-        if !mapping.contains_key(&rules_key) {
-            mapping.insert(rules_key.clone(), serde_yaml::Value::Sequence(Vec::new()));
-        }
-
-        let existing_rules_seq = mapping
-            .get_mut(&rules_key)
-            .and_then(|v| v.as_sequence_mut())
-            .ok_or_else(|| anyhow!("Existing 'rules' is not a sequence"))?;
-
-        // Append new rules or update existing if rule id matches
-        for rule in new_rules {
-            if let Some(id) = rule.get("id").and_then(|i| i.as_str()) {
-                if let Some(idx) = existing_rules_seq
-                    .iter()
-                    .position(|r| r.get("id").and_then(|i| i.as_str()) == Some(id))
-                {
-                    existing_rules_seq[idx] = rule.clone();
-                } else {
-                    existing_rules_seq.push(rule.clone());
-                }
+        for rule in parsed_new.rules {
+            let id = rule.get("id").and_then(|i| i.as_str());
+            if let Some(id) = id
+                && let Some(slot) = existing
+                    .rules
+                    .iter_mut()
+                    .find(|r| r.get("id").and_then(|i| i.as_str()) == Some(id))
+            {
+                *slot = rule;
+            } else {
+                existing.rules.push(rule);
             }
         }
-
-        existing_val
+        existing
     } else {
         parsed_new
     };
 
-    let serialized = serde_yaml::to_string(&merged_value)?;
+    let serialized = serde_saphyr::to_string(&merged)?;
     let file_header = "# Auto-generated Semgrep rules synthesized by Revue AI-Learns-Once engine\n";
     let final_content = format!("{}{}", file_header, serialized);
 

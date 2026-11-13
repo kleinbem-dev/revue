@@ -1,8 +1,12 @@
 <script lang="ts">
 	import ProviderCard from '#lib/components/ProviderCard.svelte';
-	import type { ReviewRecord, ProviderStatus, DaemonMetrics } from '#lib';
+	import {
+		computeNoiseReductionPct,
+		type ReviewRecord,
+		type ProviderStatus,
+		type DaemonMetrics
+	} from '#lib';
 	import type { PageData } from './$types';
-	import { page } from '$app/state';
 	import { pushState, invalidate } from '$app/navigation';
 	import { onMount } from 'svelte';
 
@@ -13,7 +17,11 @@
 
 	const reviews = $derived<ReviewRecord[]>(data.reviews ?? []);
 	const metrics = $derived<DaemonMetrics>(data.metrics);
-	const providers = $derived<ProviderStatus[]>(data.providers);
+	const providers = $derived<ProviderStatus[]>(data.providers ?? []);
+
+	const filterEfficiencyPct = $derived(
+		computeNoiseReductionPct(metrics.pass1_candidates, metrics.verified_findings)
+	);
 
 	const filteredReviews = $derived(
 		reviews.filter(
@@ -24,15 +32,32 @@
 	);
 
 	const nowReviews = $derived(
-		filteredReviews.filter((r: ReviewRecord) => (r.findings ?? []).length > 0 || r.triage_status === 'now')
+		filteredReviews.filter(
+			(r: ReviewRecord) => (r.findings ?? []).length > 0 || r.triage_status === 'now'
+		)
 	);
 
 	const nextReviews = $derived(
-		filteredReviews.filter((r: ReviewRecord) => (r.findings ?? []).length === 0 && r.triage_status !== 'now')
+		filteredReviews.filter(
+			(r: ReviewRecord) => (r.findings ?? []).length === 0 && r.triage_status !== 'now'
+		)
 	);
 
 	function openReview(review: ReviewRecord) {
 		pushState(`?review=${review.id}`, { selectedReviewId: review.id });
+	}
+
+	function handleActivateKeydown(e: KeyboardEvent, review: ReviewRecord) {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			openReview(review);
+		}
+	}
+
+	function priorityMeta(risk?: ReviewRecord['risk_level']): { cls: string; label: string } {
+		if (risk === 'high') return { cls: 'p1', label: '● P1 High' };
+		if (risk === 'medium') return { cls: 'p2', label: '● P2 Medium' };
+		return { cls: 'p3', label: '● P3 Low' };
 	}
 
 	function openTriggerModal() {
@@ -52,7 +77,6 @@
 	<title>Revue Dashboard — AI Code Review</title>
 </svelte:head>
 
-<!-- Metrics Overview (KPI Row) -->
 <section class="metrics-grid">
 	<div class="metric-card">
 		<span class="metric-label">Estimated SaaS Savings</span>
@@ -63,9 +87,7 @@
 	<div class="metric-card">
 		<span class="metric-label">Two-Pass Filter Efficiency</span>
 		<span class="metric-value">
-			{metrics.pass1_candidates > 0
-				? Math.round((metrics.pass2_filtered / metrics.pass1_candidates) * 100)
-				: 77}%
+			{filterEfficiencyPct !== null ? `${filterEfficiencyPct}%` : '—'}
 		</span>
 		<span class="metric-sub">{metrics.pass2_filtered} false positives pruned</span>
 	</div>
@@ -93,7 +115,6 @@
 	</div>
 </section>
 
-<!-- Multi-Provider Cascade Status -->
 <section class="section">
 	<div class="section-header">
 		<div>
@@ -103,13 +124,12 @@
 	</div>
 
 	<div class="providers-grid">
-		{#each providers as provider}
+		{#each providers as provider (provider.id ?? provider.name)}
 			<ProviderCard {provider} />
 		{/each}
 	</div>
 </section>
 
-<!-- Review Feed & Triage Board -->
 <section class="section">
 	<div class="section-header">
 		<div>
@@ -118,17 +138,18 @@
 		</div>
 
 		<div class="header-actions">
-			<!-- Layout Mode Switcher -->
-			<div class="view-toggle">
+			<div class="view-toggle" role="group" aria-label="Layout mode">
 				<button
+					type="button"
 					class="toggle-btn"
 					class:active={layoutMode === 'kanban'}
 					onclick={() => (layoutMode = 'kanban')}
-					title="CodeRabbit-style Kanban Triage"
+					title="Kanban Triage View"
 				>
 					<span>📋</span> Kanban
 				</button>
 				<button
+					type="button"
 					class="toggle-btn"
 					class:active={layoutMode === 'table'}
 					onclick={() => (layoutMode = 'table')}
@@ -139,22 +160,21 @@
 			</div>
 
 			<input
-				type="text"
+				type="search"
 				placeholder="Search repo, PR #..."
+				aria-label="Search reviews by repository or PR number"
 				class="search-input"
 				bind:value={searchQuery}
 			/>
 
-			<button class="trigger-btn" onclick={openTriggerModal}>
+			<button type="button" class="trigger-btn" onclick={openTriggerModal}>
 				+ Trigger Review
 			</button>
 		</div>
 	</div>
 
 	{#if layoutMode === 'kanban'}
-		<!-- CodeRabbit-Grade Kanban Triage View -->
 		<div class="kanban-grid">
-			<!-- Column 1: Action Required (NOW) -->
 			<div class="kanban-col">
 				<div class="col-header">
 					<div class="col-title">
@@ -168,15 +188,14 @@
 					{#if nowReviews.length === 0}
 						<div class="empty-column">No open PRs require action. Clean slate! ✨</div>
 					{:else}
-						{#each nowReviews as review}
+						{#each nowReviews as review (review.id)}
+							{@const prio = priorityMeta(review.risk_level)}
 							<div
 								class="triage-card"
 								onclick={() => openReview(review)}
 								role="button"
 								tabindex="0"
-								onkeydown={(e) => {
-									if (e.key === 'Enter') openReview(review);
-								}}
+								onkeydown={(e) => handleActivateKeydown(e, review)}
 							>
 								<div class="card-top-row">
 									{#if review.status === 'failed'}
@@ -186,7 +205,7 @@
 									{:else if review.status === 'pending'}
 										<span class="badge pending">⏳ Pending...</span>
 									{:else}
-										<span class="priority-pill p2">● P2 Medium</span>
+										<span class="priority-pill {prio.cls}">{prio.label}</span>
 									{/if}
 									<span class="forge-pill {review.forge}">{review.forge}</span>
 									{#if review.lines_added !== undefined && review.lines_removed !== undefined}
@@ -201,17 +220,14 @@
 								</div>
 								<div class="card-pr-title">{review.title}</div>
 
-								<!-- AI Executive Summary Box -->
 								<div class="ai-summary-callout">
 									<span class="callout-icon">✨</span>
 									<p>{review.summary}</p>
 								</div>
 
 								<div class="card-footer-row">
-									<span class="author-tag">@{review.author} · {review.created_at}</span>
-									<div class="card-action-btn">
-										Inspect & Fix →
-									</div>
+									<span class="author-tag">@{review.author ?? 'unknown'} · {review.created_at}</span>
+									<div class="card-action-btn">Inspect & Fix →</div>
 								</div>
 							</div>
 						{/each}
@@ -219,7 +235,6 @@
 				</div>
 			</div>
 
-			<!-- Column 2: Passed / Clean / In Backlog (NEXT) -->
 			<div class="kanban-col">
 				<div class="col-header">
 					<div class="col-title">
@@ -233,15 +248,13 @@
 					{#if nextReviews.length === 0}
 						<div class="empty-column">No clean PRs in backlog.</div>
 					{:else}
-						{#each nextReviews as review}
+						{#each nextReviews as review (review.id)}
 							<div
 								class="triage-card clean-card"
 								onclick={() => openReview(review)}
 								role="button"
 								tabindex="0"
-								onkeydown={(e) => {
-									if (e.key === 'Enter') openReview(review);
-								}}
+								onkeydown={(e) => handleActivateKeydown(e, review)}
 							>
 								<div class="card-top-row">
 									{#if review.status === 'running'}
@@ -268,7 +281,7 @@
 								</div>
 
 								<div class="card-footer-row">
-									<span class="author-tag">@{review.author} · {review.created_at}</span>
+									<span class="author-tag">@{review.author ?? 'unknown'} · {review.created_at}</span>
 									<div class="card-action-btn">View Details →</div>
 								</div>
 							</div>
@@ -278,7 +291,6 @@
 			</div>
 		</div>
 	{:else}
-		<!-- Table View -->
 		<div class="reviews-table-wrap">
 			<table class="reviews-table">
 				<thead>
@@ -298,8 +310,12 @@
 							<td colspan="7" class="empty">No review records found matching query.</td>
 						</tr>
 					{:else}
-						{#each filteredReviews as review}
-							<tr onclick={() => openReview(review)}>
+						{#each filteredReviews as review (review.id)}
+							<tr
+								tabindex="0"
+								onclick={() => openReview(review)}
+								onkeydown={(e) => handleActivateKeydown(e, review)}
+							>
 								<td>
 									<div class="pr-cell">
 										<span class="repo-pr">{review.repo} #{review.pr_number}</span>
@@ -331,6 +347,7 @@
 								</td>
 								<td>
 									<button
+										type="button"
 										class="view-btn"
 										onclick={(e) => {
 											e.stopPropagation();
@@ -357,31 +374,32 @@
 	}
 
 	.metric-card {
-		background: var(--bg-card);
-		border: 1px solid var(--border);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.85rem;
 		padding: 1.25rem 1.5rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.45rem;
+		box-shadow: var(--shadow-elevation-1);
 	}
 
 	.metric-card.highlight {
-		border-color: rgba(249, 115, 22, 0.3);
-		background: linear-gradient(135deg, rgba(249, 115, 22, 0.05) 0%, #161b22 100%);
+		border-color: var(--color-accent);
+		background: linear-gradient(135deg, var(--color-accent-soft) 0%, var(--color-surface) 100%);
 	}
 
 	.metric-label {
 		font-size: 0.85rem;
 		font-weight: 500;
-		color: var(--text-muted);
+		color: var(--color-muted);
 	}
 
 	.metric-value {
 		font-size: 1.75rem;
 		font-weight: 700;
 		letter-spacing: -0.02em;
-		color: #f8fafc;
+		color: var(--color-heading);
 	}
 
 	.metric-value.live-pill {
@@ -389,7 +407,7 @@
 		align-items: center;
 		gap: 0.6rem;
 		font-size: 1.35rem;
-		color: #34d399;
+		color: var(--color-status-success);
 	}
 
 	.metric-value.offline-pill {
@@ -397,32 +415,39 @@
 		align-items: center;
 		gap: 0.6rem;
 		font-size: 1.25rem;
-		color: #f87171;
+		color: var(--color-status-danger);
 	}
 
 	.dot {
 		width: 10px;
 		height: 10px;
 		border-radius: 50%;
-		background: #10b981;
-		box-shadow: 0 0 12px #10b981;
+		background: var(--color-status-success);
+		box-shadow: 0 0 10px var(--color-status-success);
 		animation: pulseDot 2s ease-in-out infinite;
 	}
 
 	.dot.offline {
-		background: #ef4444;
-		box-shadow: 0 0 12px #ef4444;
+		background: var(--color-status-danger);
+		box-shadow: none;
 		animation: none;
 	}
 
 	@keyframes pulseDot {
-		0%, 100% { opacity: 1; transform: scale(1); }
-		50% { opacity: 0.4; transform: scale(0.85); }
+		0%,
+		100% {
+			opacity: 1;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.45;
+			transform: scale(0.85);
+		}
 	}
 
 	.metric-sub {
 		font-size: 0.75rem;
-		color: #64748b;
+		color: var(--color-muted);
 	}
 
 	.section {
@@ -444,11 +469,12 @@
 		font-weight: 600;
 		margin: 0;
 		letter-spacing: -0.01em;
+		color: var(--color-heading);
 	}
 
 	.section-header .sub {
 		font-size: 0.85rem;
-		color: var(--text-muted);
+		color: var(--color-muted);
 	}
 
 	.header-actions {
@@ -460,8 +486,8 @@
 
 	.view-toggle {
 		display: flex;
-		background: #161b22;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.5rem;
 		padding: 0.2rem;
 		gap: 0.2rem;
@@ -470,7 +496,7 @@
 	.toggle-btn {
 		background: transparent;
 		border: none;
-		color: #8b949e;
+		color: var(--color-muted);
 		font-size: 0.8rem;
 		font-weight: 600;
 		padding: 0.35rem 0.65rem;
@@ -483,21 +509,21 @@
 	}
 
 	.toggle-btn:hover {
-		color: #f0f6fc;
+		color: var(--color-heading);
 	}
 
 	.toggle-btn.active {
-		background: #21262d;
-		color: #f97316;
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+		background: var(--color-surface-high);
+		color: var(--color-accent);
+		box-shadow: var(--shadow-elevation-1);
 	}
 
 	.search-input {
-		background: #161b22;
-		border: 1px solid var(--border);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.5rem;
 		padding: 0.45rem 0.85rem;
-		color: var(--text);
+		color: var(--color-fg);
 		font-size: 0.85rem;
 		outline: none;
 		min-width: 220px;
@@ -505,12 +531,12 @@
 	}
 
 	.search-input:focus {
-		border-color: #f97316;
+		border-color: var(--color-accent);
 	}
 
 	.trigger-btn {
-		background: #f97316;
-		color: #fff;
+		background: var(--color-accent);
+		color: var(--color-accent-fg);
 		border: none;
 		border-radius: 0.5rem;
 		padding: 0.5rem 1rem;
@@ -524,7 +550,7 @@
 	}
 
 	.trigger-btn:hover {
-		background: #ea580c;
+		background: var(--color-accent-hover);
 	}
 
 	.providers-grid {
@@ -535,14 +561,14 @@
 
 	.kanban-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+		grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
 		gap: 1.5rem;
 		align-items: start;
 	}
 
 	.kanban-col {
-		background: #12171f;
-		border: 1px solid rgba(255, 255, 255, 0.05);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.85rem;
 		padding: 1.25rem;
 		display: flex;
@@ -555,7 +581,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding-bottom: 0.75rem;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+		border-bottom: 1px solid var(--color-line);
 	}
 
 	.col-title {
@@ -569,6 +595,7 @@
 		font-weight: 600;
 		margin: 0;
 		letter-spacing: -0.01em;
+		color: var(--color-heading);
 	}
 
 	.dot-status {
@@ -578,27 +605,25 @@
 	}
 
 	.dot-status.now {
-		background: #f97316;
-		box-shadow: 0 0 8px #f97316;
+		background: var(--color-accent);
 	}
 
 	.dot-status.next {
-		background: #3b82f6;
-		box-shadow: 0 0 8px #3b82f6;
+		background: var(--color-status-info);
 	}
 
 	.count-badge {
 		font-size: 0.75rem;
 		font-weight: 700;
-		background: rgba(249, 115, 22, 0.15);
-		color: #f97316;
+		background: var(--color-accent-soft);
+		color: var(--color-accent-soft-fg);
 		padding: 0.15rem 0.55rem;
 		border-radius: 9999px;
 	}
 
 	.count-badge.clean {
-		background: rgba(59, 130, 246, 0.15);
-		color: #60a5fa;
+		background: var(--color-status-info-soft);
+		color: var(--color-status-info);
 	}
 
 	.cards-col {
@@ -610,15 +635,15 @@
 	.empty-column {
 		text-align: center;
 		padding: 2.5rem 1rem;
-		color: #64748b;
+		color: var(--color-muted);
 		font-size: 0.85rem;
-		border: 1px dashed rgba(255, 255, 255, 0.08);
+		border: 1px dashed var(--color-outline);
 		border-radius: 0.5rem;
 	}
 
 	.triage-card {
-		background: #161b22;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--color-bg);
+		border: 1px solid var(--color-line);
 		border-radius: 0.65rem;
 		padding: 1.1rem;
 		display: flex;
@@ -629,14 +654,17 @@
 		text-align: left;
 	}
 
-	.triage-card:hover {
-		border-color: rgba(249, 115, 22, 0.4);
+	.triage-card:hover,
+	.triage-card:focus-visible {
+		border-color: var(--color-accent);
 		transform: translateY(-2px);
-		box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+		box-shadow: var(--shadow-elevation-2);
+		outline: none;
 	}
 
-	.triage-card.clean-card:hover {
-		border-color: rgba(59, 130, 246, 0.4);
+	.triage-card.clean-card:hover,
+	.triage-card.clean-card:focus-visible {
+		border-color: var(--color-status-info);
 	}
 
 	.card-top-row {
@@ -654,9 +682,19 @@
 		letter-spacing: 0.02em;
 	}
 
+	.priority-pill.p1 {
+		background: var(--color-status-danger-soft);
+		color: var(--color-status-danger);
+	}
+
 	.priority-pill.p2 {
-		background: rgba(245, 158, 11, 0.15);
-		color: #fbbf24;
+		background: var(--color-status-warning-soft);
+		color: var(--color-status-warning);
+	}
+
+	.priority-pill.p3 {
+		background: var(--color-status-info-soft);
+		color: var(--color-status-info);
 	}
 
 	.forge-pill {
@@ -665,20 +703,20 @@
 		padding: 0.15rem 0.45rem;
 		border-radius: 0.25rem;
 		text-transform: uppercase;
-		background: #21262d;
-		color: #8b949e;
+		background: var(--color-surface-high);
+		color: var(--color-muted);
 	}
 
 	.forge-pill.forgejo {
-		background: rgba(16, 185, 129, 0.15);
-		color: #34d399;
+		background: var(--color-status-success-soft);
+		color: var(--color-status-success);
 	}
 
 	.diff-chip {
 		font-size: 0.7rem;
-		font-family: monospace;
-		color: #8b949e;
-		background: rgba(255, 255, 255, 0.04);
+		font-family: var(--font-mono);
+		color: var(--color-muted);
+		background: var(--color-surface-high);
 		padding: 0.1rem 0.4rem;
 		border-radius: 0.25rem;
 		margin-left: auto;
@@ -687,25 +725,25 @@
 	.card-pr-name {
 		font-size: 0.85rem;
 		font-weight: 600;
-		color: #f97316;
+		color: var(--color-accent);
 		letter-spacing: -0.01em;
 	}
 
 	.clean-card .card-pr-name {
-		color: #60a5fa;
+		color: var(--color-status-info);
 	}
 
 	.card-pr-title {
 		font-size: 0.95rem;
 		font-weight: 600;
-		color: #f0f6fc;
+		color: var(--color-heading);
 		line-height: 1.35;
 		margin-top: -0.25rem;
 	}
 
 	.ai-summary-callout {
-		background: rgba(249, 115, 22, 0.05);
-		border-left: 2px solid #f97316;
+		background: var(--color-accent-soft);
+		border-left: 2px solid var(--color-accent);
 		padding: 0.6rem 0.8rem;
 		border-radius: 0 0.35rem 0.35rem 0;
 		display: flex;
@@ -714,8 +752,8 @@
 	}
 
 	.ai-summary-callout.clean {
-		background: rgba(59, 130, 246, 0.05);
-		border-left-color: #3b82f6;
+		background: var(--color-status-info-soft);
+		border-left-color: var(--color-status-info);
 	}
 
 	.callout-icon {
@@ -726,7 +764,7 @@
 	.ai-summary-callout p {
 		margin: 0;
 		font-size: 0.775rem;
-		color: #cbd5e1;
+		color: var(--color-fg);
 		line-height: 1.45;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
@@ -741,33 +779,32 @@
 		justify-content: space-between;
 		margin-top: 0.25rem;
 		padding-top: 0.5rem;
-		border-top: 1px solid rgba(255, 255, 255, 0.05);
+		border-top: 1px solid var(--color-line);
 	}
 
 	.author-tag {
 		font-size: 0.725rem;
-		color: #64748b;
+		color: var(--color-muted);
 	}
 
 	.card-action-btn {
 		font-size: 0.75rem;
 		font-weight: 600;
-		color: #f97316;
+		color: var(--color-accent);
 		display: flex;
 		align-items: center;
 		gap: 0.25rem;
 	}
 
 	.clean-card .card-action-btn {
-		color: #60a5fa;
+		color: var(--color-status-info);
 	}
 
-	/* Table View */
 	.reviews-table-wrap {
-		background: #161b22;
-		border: 1px solid var(--border);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.75rem;
-		overflow: hidden;
+		overflow-x: auto;
 	}
 
 	.reviews-table {
@@ -778,26 +815,28 @@
 	}
 
 	.reviews-table th {
-		background: #0f131a;
+		background: var(--color-surface-high);
 		padding: 0.85rem 1.15rem;
-		color: var(--text-muted);
+		color: var(--color-muted);
 		font-weight: 600;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--color-line);
 	}
 
 	.reviews-table td {
 		padding: 1rem 1.15rem;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-		color: var(--text);
+		border-bottom: 1px solid var(--color-line);
+		color: var(--color-fg);
 	}
 
-	.reviews-table tr {
+	.reviews-table tbody tr {
 		cursor: pointer;
 		transition: background 0.15s ease;
 	}
 
-	.reviews-table tr:hover {
-		background: rgba(255, 255, 255, 0.02);
+	.reviews-table tbody tr:hover,
+	.reviews-table tbody tr:focus-visible {
+		background: var(--color-surface-high);
+		outline: none;
 	}
 
 	.pr-cell {
@@ -808,12 +847,12 @@
 
 	.repo-pr {
 		font-weight: 600;
-		color: #f97316;
+		color: var(--color-accent);
 	}
 
 	.title-preview {
 		font-size: 0.775rem;
-		color: var(--text-muted);
+		color: var(--color-muted);
 	}
 
 	.badge {
@@ -824,48 +863,55 @@
 	}
 
 	.badge.clean {
-		background: rgba(16, 185, 129, 0.15);
-		color: #34d399;
+		background: var(--color-status-success-soft);
+		color: var(--color-status-success);
 	}
 
 	.badge.pending {
-		background: rgba(148, 163, 184, 0.15);
-		color: #94a3b8;
-		border: 1px solid rgba(148, 163, 184, 0.3);
+		background: var(--color-surface-high);
+		color: var(--color-muted);
+		border: 1px solid var(--color-outline);
 	}
 
 	.badge.error {
-		background: rgba(239, 68, 68, 0.15);
-		color: #f87171;
-		border: 1px solid rgba(239, 68, 68, 0.3);
+		background: var(--color-status-danger-soft);
+		color: var(--color-status-danger);
+		border: 1px solid var(--color-status-danger-border);
 	}
 
 	.badge.running {
-		background: rgba(217, 119, 6, 0.15);
-		color: #fbbf24;
-		border: 1px solid rgba(245, 158, 11, 0.3);
+		background: var(--color-status-warning-soft);
+		color: var(--color-status-warning);
+		border: 1px solid var(--color-status-warning-border);
 		animation: badgePulse 1.5s ease-in-out infinite;
 	}
 
 	@keyframes badgePulse {
-		0%, 100% { opacity: 1; transform: scale(1); }
-		50% { opacity: 0.7; transform: scale(0.98); }
+		0%,
+		100% {
+			opacity: 1;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.7;
+			transform: scale(0.98);
+		}
 	}
 
 	.badge.issues {
-		background: rgba(245, 158, 11, 0.15);
-		color: #fbbf24;
+		background: var(--color-status-warning-soft);
+		color: var(--color-status-warning);
 	}
 
 	.filter-stat {
 		font-size: 0.8rem;
-		color: #8b949e;
+		color: var(--color-muted);
 	}
 
 	.view-btn {
-		background: #21262d;
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		color: #f0f6fc;
+		background: var(--color-surface-high);
+		border: 1px solid var(--color-outline);
+		color: var(--color-heading);
 		padding: 0.35rem 0.75rem;
 		border-radius: 0.35rem;
 		font-size: 0.8rem;
@@ -874,12 +920,13 @@
 	}
 
 	.view-btn:hover {
-		background: #30363d;
+		border-color: var(--color-accent);
+		color: var(--color-accent);
 	}
 
 	.empty {
 		text-align: center;
 		padding: 2.5rem;
-		color: #8b949e;
+		color: var(--color-muted);
 	}
 </style>

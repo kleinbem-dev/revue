@@ -1,36 +1,57 @@
 <script lang="ts">
+	import {
+		modalDialog,
+		type ProviderStatus,
+		type ReviewRecord
+	} from '#lib';
+
 	let {
 		isOpen = true,
+		providers = [],
+		recentReviews = [],
 		onClose,
 		onTrigger
 	}: {
 		isOpen?: boolean;
+		providers?: ProviderStatus[];
+		recentReviews?: ReviewRecord[];
 		onClose: () => void;
 		onTrigger: (repo: string, pr: number, publish: boolean) => Promise<void>;
 	} = $props();
 
-	let repo = $state('kleinbem/nix-config');
-	let pr = $state<number | ''>(516);
+	let repo = $state('');
+	let pr = $state<number | ''>('');
 	let publish = $state(false);
 	let isSubmitting = $state(false);
 	let error = $state<string | null>(null);
 
-	const presets = [
-		{ repo: 'kleinbem/nix-config', pr: 516, desc: 'feat: containerize revue service' },
-		{ repo: 'kleinbem/nix-config', pr: 505, desc: 'feat: enable forgejo & revue daemon' },
-		{ repo: 'kleinbem/revue', pr: 1, desc: 'feat: add Brain & Skills directory' }
-	];
+	const recentTargets = $derived.by(() => {
+		const out: Array<{ repo: string; pr: number }> = [];
+		for (const item of recentReviews) {
+			if (!item.repo || !item.pr_number) continue;
+			if (out.some((t) => t.repo === item.repo && t.pr === item.pr_number)) continue;
+			out.push({ repo: item.repo, pr: item.pr_number });
+			if (out.length >= 4) break;
+		}
+		return out;
+	});
 
-	function selectPreset(presetRepo: string, presetPr: number) {
-		repo = presetRepo;
-		pr = presetPr;
+	const cascadeSummary = $derived(
+		providers.length > 0
+			? providers.map((p) => p.name).join(' → ')
+			: 'Configured provider cascade'
+	);
+
+	function selectTarget(targetRepo: string, targetPr: number) {
+		repo = targetRepo;
+		pr = targetPr;
 		error = null;
 	}
 
 	async function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
-		if (!repo || !pr) {
-			error = 'Please provide both repository and PR number.';
+		if (!repo.trim() || !pr || Number(pr) <= 0) {
+			error = 'Please provide a valid owner/repo slug and positive PR number.';
 			return;
 		}
 
@@ -47,134 +68,125 @@
 	}
 </script>
 
-<svelte:window
-	onkeydown={(e) => {
-		if (isOpen && e.key === 'Escape') onClose();
-	}}
-/>
-
 {#if isOpen}
-	<div class="overlay" onclick={onClose} role="presentation">
-		<div
-			class="modal"
-			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
-			role="dialog"
-			aria-modal="true"
-			tabindex="-1"
-		>
-			<div class="modal-header">
-				<div class="header-left">
-					<span class="header-icon">🚀</span>
-					<h3>Trigger On-Demand Review</h3>
-				</div>
-				<button class="close-btn" onclick={onClose} aria-label="Close">✕</button>
+	<dialog
+		{@attach modalDialog(onClose)}
+		class="trigger-dialog"
+		closedby="any"
+		aria-labelledby="trigger-dialog-title"
+		onclose={onClose}
+	>
+		<div class="modal-header">
+			<div class="header-left">
+				<span class="header-icon">🚀</span>
+				<h3 id="trigger-dialog-title">Trigger On-Demand Review</h3>
 			</div>
+			<button type="button" class="close-btn" onclick={onClose} aria-label="Close">✕</button>
+		</div>
 
-			<form onsubmit={handleSubmit} class="modal-body">
-				<p class="desc">
-					Manually trigger the 2-pass review pipeline (<strong>Pass 1 Detective</strong> + <strong>Pass 2 Judge</strong>) on any pull request. Episodic brain constraints and fleet skills will be injected automatically.
-				</p>
+		<form onsubmit={handleSubmit} class="modal-body">
+			<p class="desc">
+				Manually trigger the two-pass review pipeline (<strong>Pass 1 Detective</strong> +
+				<strong>Pass 2 Judge</strong>) on any pull request. Episodic constraints and matching skills
+				are injected automatically.
+			</p>
 
-				{#if error}
-					<div class="error-banner">{error}</div>
-				{/if}
+			{#if error}
+				<div class="error-banner" role="alert">{error}</div>
+			{/if}
 
-				<!-- Preset Quick Chips -->
+			{#if recentTargets.length > 0}
 				<div class="preset-section">
-					<span class="preset-label">Quick Presets:</span>
+					<span class="preset-label">Recent Pull Requests:</span>
 					<div class="preset-chips">
-						{#each presets as preset}
+						{#each recentTargets as target (`${target.repo}#${target.pr}`)}
 							<button
 								type="button"
 								class="chip-btn"
-								class:selected={repo === preset.repo && pr === preset.pr}
-								onclick={() => selectPreset(preset.repo, preset.pr)}
+								class:selected={repo === target.repo && pr === target.pr}
+								onclick={() => selectTarget(target.repo, target.pr)}
 							>
-								<span class="chip-pr">#{preset.pr}</span>
-								<span class="chip-repo">{preset.repo.replace('kleinbem/', '')}</span>
+								<span class="chip-pr">#{target.pr}</span>
+								<span class="chip-repo">{target.repo}</span>
 							</button>
 						{/each}
 					</div>
 				</div>
+			{/if}
 
-				<div class="field">
-					<label for="repo-input">Repository</label>
-					<input
-						id="repo-input"
-						type="text"
-						bind:value={repo}
-						placeholder="e.g. kleinbem/nix-config or owner/repo"
-						required
-					/>
-				</div>
+			<div class="field">
+				<label for="repo-input">Repository</label>
+				<input
+					id="repo-input"
+					type="text"
+					bind:value={repo}
+					placeholder="owner/repo"
+					required
+				/>
+			</div>
 
-				<div class="field">
-					<label for="pr-input">Pull Request Number</label>
-					<input
-						id="pr-input"
-						type="number"
-						bind:value={pr}
-						placeholder="e.g. 516"
-						min="1"
-						required
-					/>
-				</div>
+			<div class="field">
+				<label for="pr-input">Pull Request Number</label>
+				<input
+					id="pr-input"
+					type="number"
+					bind:value={pr}
+					placeholder="42"
+					min="1"
+					required
+				/>
+			</div>
 
-				<div class="publish-box">
-					<label class="publish-label">
-						<input type="checkbox" bind:checked={publish} class="publish-checkbox" />
-						<div class="publish-text">
-							<span class="publish-title">Post Review Directly to Forge</span>
-							<span class="publish-subtitle">Submit verified findings & line diff suggestions to GitHub / Forgejo PR</span>
-						</div>
-					</label>
-				</div>
-
-				<div class="pipeline-preview">
-					<span class="pipeline-label">Execution Strategy:</span>
-					<div class="pipeline-badge">
-						<span class="dot live"></span>
-						<span>Gemini 2.5 Pro → Mesh-LLM P2P GPU (Fallback)</span>
+			<div class="publish-box">
+				<label class="publish-label">
+					<input type="checkbox" bind:checked={publish} class="publish-checkbox" />
+					<div class="publish-text">
+						<span class="publish-title">Post Review Directly to Forge</span>
+						<span class="publish-subtitle">
+							Submit verified findings & line diff suggestions to GitHub / Forgejo PR
+						</span>
 					</div>
-				</div>
+				</label>
+			</div>
 
-				<div class="modal-actions">
-					<button type="button" class="btn btn-secondary" onclick={onClose}>Cancel</button>
-					<button type="submit" class="btn btn-primary" disabled={isSubmitting}>
-						{#if isSubmitting}
-							<span class="spinner"></span> Starting Review...
-						{:else}
-							<span>Execute Review 🚀</span>
-						{/if}
-					</button>
+			<div class="pipeline-preview">
+				<span class="pipeline-label">Provider Cascade:</span>
+				<div class="pipeline-badge">
+					<span class="dot live"></span>
+					<span>{cascadeSummary}</span>
 				</div>
-			</form>
-		</div>
-	</div>
+			</div>
+
+			<div class="modal-actions">
+				<button type="button" class="btn btn-secondary" onclick={onClose}>Cancel</button>
+				<button type="submit" class="btn btn-primary" disabled={isSubmitting}>
+					{#if isSubmitting}
+						<span class="spinner"></span> Starting Review...
+					{:else}
+						<span>Execute Review 🚀</span>
+					{/if}
+				</button>
+			</div>
+		</form>
+	</dialog>
 {/if}
 
 <style>
-	.overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.75);
-		backdrop-filter: blur(8px);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 1000;
-		padding: 1rem;
-	}
-
-	.modal {
-		background: #11151c;
-		border: 1px solid rgba(255, 255, 255, 0.12);
+	.trigger-dialog {
+		padding: 0;
+		background: var(--color-bg);
+		color: var(--color-fg);
+		border: 1px solid var(--color-outline);
 		border-radius: 0.85rem;
-		max-width: 500px;
+		max-width: min(520px, calc(100vw - 2rem));
 		width: 100%;
 		overflow: hidden;
-		box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+		box-shadow: var(--shadow-elevation-3);
+	}
+
+	.trigger-dialog[open] {
+		display: flex;
+		flex-direction: column;
 	}
 
 	.modal-header {
@@ -182,8 +194,8 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 1.15rem 1.5rem;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-		background: #161c26;
+		border-bottom: 1px solid var(--color-line);
+		background: var(--color-surface);
 	}
 
 	.header-left {
@@ -199,14 +211,14 @@
 	h3 {
 		font-size: 1.05rem;
 		font-weight: 600;
-		color: #f0f6fc;
+		color: var(--color-heading);
 		margin: 0;
 	}
 
 	.close-btn {
 		background: none;
 		border: none;
-		color: #8b949e;
+		color: var(--color-muted);
 		font-size: 1.1rem;
 		cursor: pointer;
 		padding: 0.25rem 0.5rem;
@@ -215,8 +227,8 @@
 	}
 
 	.close-btn:hover {
-		color: #f0f6fc;
-		background: rgba(255, 255, 255, 0.08);
+		color: var(--color-heading);
+		background: var(--color-surface-high);
 	}
 
 	.modal-body {
@@ -224,23 +236,24 @@
 		display: flex;
 		flex-direction: column;
 		gap: 1.15rem;
+		overflow-y: auto;
 	}
 
 	.desc {
 		font-size: 0.85rem;
-		color: #8b949e;
+		color: var(--color-muted);
 		margin: 0;
 		line-height: 1.5;
 	}
 
 	.desc strong {
-		color: #f0f6fc;
+		color: var(--color-heading);
 	}
 
 	.error-banner {
-		background: rgba(248, 81, 73, 0.15);
-		border: 1px solid rgba(248, 81, 73, 0.3);
-		color: #ff7b72;
+		background: var(--color-status-danger-soft);
+		border: 1px solid var(--color-status-danger-border);
+		color: var(--color-status-danger);
 		font-size: 0.825rem;
 		padding: 0.65rem 0.85rem;
 		border-radius: 0.45rem;
@@ -257,7 +270,7 @@
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.04em;
-		color: #8b949e;
+		color: var(--color-muted);
 	}
 
 	.preset-chips {
@@ -267,11 +280,11 @@
 	}
 
 	.chip-btn {
-		background: #1c2331;
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.45rem;
 		padding: 0.35rem 0.65rem;
-		color: #c9d1d9;
+		color: var(--color-fg);
 		font-size: 0.775rem;
 		cursor: pointer;
 		display: flex;
@@ -281,15 +294,15 @@
 	}
 
 	.chip-btn:hover {
-		background: #252f42;
-		border-color: rgba(255, 255, 255, 0.2);
-		color: #f0f6fc;
+		background: var(--color-surface-high);
+		border-color: var(--color-outline);
+		color: var(--color-heading);
 	}
 
 	.chip-btn.selected {
-		background: rgba(88, 166, 255, 0.15);
-		border-color: #58a6ff;
-		color: #58a6ff;
+		background: var(--color-accent-soft);
+		border-color: var(--color-accent);
+		color: var(--color-accent-soft-fg);
 	}
 
 	.chip-pr {
@@ -305,36 +318,31 @@
 	label {
 		font-size: 0.8rem;
 		font-weight: 500;
-		color: #c9d1d9;
+		color: var(--color-fg);
 	}
 
-	input {
-		background: #090d13;
-		border: 1px solid rgba(255, 255, 255, 0.15);
+	input[type='text'],
+	input[type='number'] {
+		background: var(--color-surface);
+		border: 1px solid var(--color-outline);
 		border-radius: 0.45rem;
 		padding: 0.6rem 0.85rem;
 		font-size: 0.875rem;
-		color: #f0f6fc;
+		color: var(--color-heading);
 		outline: none;
 		transition: border-color 0.15s ease;
 	}
 
-	input:focus {
-		border-color: #58a6ff;
-		box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+	input[type='text']:focus,
+	input[type='number']:focus {
+		border-color: var(--color-accent);
 	}
 
 	.publish-box {
-		background: rgba(31, 111, 235, 0.08);
-		border: 1px solid rgba(56, 139, 253, 0.3);
+		background: var(--color-status-info-soft);
+		border: 1px solid var(--color-status-info-border);
 		border-radius: 0.5rem;
 		padding: 0.75rem 0.9rem;
-		transition: all 0.2s ease;
-	}
-
-	.publish-box:hover {
-		background: rgba(31, 111, 235, 0.12);
-		border-color: rgba(56, 139, 253, 0.5);
 	}
 
 	.publish-label {
@@ -349,7 +357,7 @@
 		margin-top: 0.2rem;
 		width: 1.05rem;
 		height: 1.05rem;
-		accent-color: #388bfd;
+		accent-color: var(--color-accent);
 		cursor: pointer;
 	}
 
@@ -362,12 +370,12 @@
 	.publish-title {
 		font-size: 0.85rem;
 		font-weight: 600;
-		color: #e6edf3;
+		color: var(--color-heading);
 	}
 
 	.publish-subtitle {
 		font-size: 0.72rem;
-		color: #8b949e;
+		color: var(--color-muted);
 		line-height: 1.3;
 	}
 
@@ -375,22 +383,24 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		background: #161c26;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		flex-wrap: wrap;
+		gap: 0.5rem;
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.45rem;
 		padding: 0.65rem 0.85rem;
 		font-size: 0.775rem;
 	}
 
 	.pipeline-label {
-		color: #8b949e;
+		color: var(--color-muted);
 	}
 
 	.pipeline-badge {
 		display: flex;
 		align-items: center;
 		gap: 0.45rem;
-		color: #f0f6fc;
+		color: var(--color-heading);
 		font-weight: 500;
 	}
 
@@ -398,8 +408,7 @@
 		width: 7px;
 		height: 7px;
 		border-radius: 50%;
-		background: #3fb950;
-		box-shadow: 0 0 6px #3fb950;
+		background: var(--color-status-success);
 	}
 
 	.modal-actions {
@@ -407,14 +416,14 @@
 		align-items: center;
 		justify-content: flex-end;
 		gap: 0.75rem;
-		margin-top: 0.5rem;
+		margin-top: 0.25rem;
 	}
 
 	.btn {
 		padding: 0.6rem 1.25rem;
 		border-radius: 0.45rem;
 		font-size: 0.85rem;
-		font-weight: 500;
+		font-weight: 600;
 		cursor: pointer;
 		transition: all 0.15s ease;
 		border: 1px solid transparent;
@@ -424,23 +433,23 @@
 	}
 
 	.btn-secondary {
-		background: #1c2331;
-		border-color: rgba(255, 255, 255, 0.12);
-		color: #c9d1d9;
+		background: var(--color-surface);
+		border-color: var(--color-line);
+		color: var(--color-fg);
 	}
 
 	.btn-secondary:hover {
-		background: #252f42;
-		color: #f0f6fc;
+		background: var(--color-surface-high);
+		color: var(--color-heading);
 	}
 
 	.btn-primary {
-		background: #238636;
-		color: white;
+		background: var(--color-accent);
+		color: var(--color-accent-fg);
 	}
 
 	.btn-primary:hover:not(:disabled) {
-		background: #2ea043;
+		background: var(--color-accent-hover);
 	}
 
 	.btn-primary:disabled {
@@ -451,8 +460,8 @@
 	.spinner {
 		width: 14px;
 		height: 14px;
-		border: 2px solid rgba(255, 255, 255, 0.3);
-		border-top-color: white;
+		border: 2px solid rgba(255, 255, 255, 0.35);
+		border-top-color: currentColor;
 		border-radius: 50%;
 		animation: spin 0.8s linear infinite;
 	}

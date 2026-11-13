@@ -1,82 +1,45 @@
 <script lang="ts">
-	import type { WizardConfig } from '../types';
+	import { generateRevueYaml, type WizardConfig } from '#lib';
 
 	let config = $state<WizardConfig>({
 		profile: 'chill',
-		max_merge_risk: 'medium',
 		high_level_summary: true,
 		anti_slop: true,
+		semgrep: true,
 		ignore_lockfiles: true,
 		ignore_vendor: true,
 		ignore_generated: true,
-		custom_guidelines: 'Enforce zero-trust network boundaries.\nNever hardcode credentials or secrets in plain text.\nRequire signed commits for production branches.'
+		custom_guidelines:
+			'Enforce zero-trust network boundaries.\nNever hardcode credentials or secrets in plain text.\nRequire signed commits for production branches.'
 	});
 
 	let copied = $state(false);
 
-	const generatedYaml = $derived.by(() => {
-		const toneByProfile: Record<string, string> = {
-			chill: 'Short and direct. Lead with the problem and the fix. No praise, no filler.',
-			quiet: 'Concise and minimal. Only report actionable errors and critical issues. No praise.',
-			assertive: 'Strict and thorough. Flag potential regressions, security edge cases, and style issues.'
-		};
+	const toneByProfile: Record<WizardConfig['profile'], string> = {
+		chill: 'Short and direct. Lead with the problem and the fix. No praise, no filler.',
+		quiet: 'Concise and minimal. Only report actionable errors and critical issues. No praise.',
+		assertive: 'Strict and thorough. Flag potential regressions, security edge cases, and subtle bugs.'
+	};
 
-		const severityByProfile: Record<string, string> = {
-			chill: 'warning',
-			quiet: 'error',
-			assertive: 'info'
-		};
+	const severityByProfile: Record<WizardConfig['profile'], 'info' | 'warning' | 'error'> = {
+		chill: 'warning',
+		quiet: 'error',
+		assertive: 'info'
+	};
 
-		const lines = [
-			'# yaml-language-server: $schema=https://revue.kleinbem.dev/schema.json',
-			'# Revue AI Code Review Configuration',
-			'version: 1',
-			'',
-			'review:',
-			`  tone: ${JSON.stringify(toneByProfile[config.profile] ?? toneByProfile.chill)}`,
-			`  min_severity: "${severityByProfile[config.profile] ?? 'warning'}"`,
-			`  summary: ${config.high_level_summary}`,
-			`  two_pass: ${config.anti_slop}`,
-			'  semgrep: true'
-		];
-
-		const ignores: string[] = [];
-		if (config.ignore_lockfiles) {
-			ignores.push('!**/*.lock', '!**/flake.lock', '!**/Cargo.lock', '!**/package-lock.json');
-		}
-		if (config.ignore_vendor) {
-			ignores.push('!**/vendor/**', '!**/node_modules/**');
-		}
-		if (config.ignore_generated) {
-			ignores.push('!**/*.generated.*', '!**/dist/**', '!**/target/**');
-		}
-
-		if (ignores.length > 0) {
-			lines.push('  ignore:');
-			for (const ig of ignores) {
-				lines.push(`    - "${ig}"`);
-			}
-		}
-
-		if (config.custom_guidelines.trim()) {
-			lines.push('  rules:');
-			lines.push('    - path: "**/*"');
-			const guidelineLines = config.custom_guidelines
-				.split('\n')
-				.map((l) => l.trim())
-				.filter(Boolean);
-			if (guidelineLines.length === 1) {
-				lines.push(`      instructions: ${JSON.stringify(guidelineLines[0])}`);
-			} else if (guidelineLines.length > 1) {
-				lines.push('      instructions: |');
-				for (const gl of guidelineLines) {
-					lines.push(`        ${gl}`);
-				}
-			}
-		}
-
-		return lines.join('\n');
-	});
+	const generatedYaml = $derived(
+		generateRevueYaml({
+			min_severity: severityByProfile[config.profile],
+			summary: config.high_level_summary,
+			two_pass: config.anti_slop,
+			semgrep: config.semgrep,
+			ignore_lockfiles: config.ignore_lockfiles,
+			ignore_vendor: config.ignore_vendor,
+			ignore_generated: config.ignore_generated,
+			tone: toneByProfile[config.profile],
+			custom_guidelines: config.custom_guidelines
+		})
+	);
 
 	function copyYaml() {
 		navigator.clipboard.writeText(generatedYaml).then(() => {
@@ -99,36 +62,32 @@
 </script>
 
 <div class="wizard-container">
-	<!-- Hero Header -->
 	<div class="wizard-header">
 		<div class="header-left">
-			<span class="sparkle">🥕</span>
+			<span class="sparkle" aria-hidden="true">⚙️</span>
 			<div>
 				<h2>Rules & Configuration Wizard</h2>
 				<p class="subtitle">
-					Configure AI review strictness, path filters, and guidelines for your repositories.
+					Configure AI review strictness, path filters, and repository guidelines.
 				</p>
 			</div>
 		</div>
 		<div class="header-actions">
-			<button class="btn primary" onclick={copyYaml}>
+			<button type="button" class="btn primary" onclick={copyYaml}>
 				{#if copied}
-					<span class="check">✓</span> Copied .revue.yaml!
+					<span>✓</span> Copied .revue.yaml!
 				{:else}
 					<span>📋</span> Copy .revue.yaml
 				{/if}
 			</button>
-			<button class="btn outline" onclick={downloadYaml}>
+			<button type="button" class="btn outline" onclick={downloadYaml}>
 				<span>⬇</span> Download
 			</button>
 		</div>
 	</div>
 
-	<!-- Wizard Grid -->
 	<div class="wizard-grid">
-		<!-- Left: Controls Form -->
 		<div class="controls-panel">
-			<!-- Tone & Strictness -->
 			<div class="card">
 				<div class="card-title">
 					<span class="badge-num">1</span>
@@ -159,19 +118,18 @@
 						<input type="radio" name="profile" value="assertive" bind:group={config.profile} />
 						<div class="profile-info">
 							<div class="p-title">Assertive</div>
-							<div class="p-desc">Deep and thorough. Flags style idioms, edge cases, refactoring suggestions.</div>
+							<div class="p-desc">Deep and thorough. Flags performance edge cases, regressions, and subtle risks.</div>
 						</div>
 					</label>
 				</div>
 			</div>
 
-			<!-- Workflow & Approvals -->
 			<div class="card">
 				<div class="card-title">
 					<span class="badge-num">2</span>
 					<div>
-						<h3>Review Automation & Governance</h3>
-						<span class="hint">Control PR summary comments and automated merge gates</span>
+						<h3>Verification Passes</h3>
+						<span class="hint">Control executive summary, Pass 0 AST rules, and Pass 2 judge verification</span>
 					</div>
 				</div>
 
@@ -179,7 +137,7 @@
 					<label class="toggle-row">
 						<div>
 							<div class="t-name">High-Level Executive Summary</div>
-							<div class="t-sub">Post a 2-sentence impact summary and risk assessment on PRs</div>
+							<div class="t-sub">Include a concise impact summary on reviewed pull requests</div>
 						</div>
 						<input type="checkbox" bind:checked={config.high_level_summary} />
 					</label>
@@ -191,16 +149,23 @@
 						</div>
 						<input type="checkbox" bind:checked={config.anti_slop} />
 					</label>
+
+					<label class="toggle-row">
+						<div>
+							<div class="t-name">Deterministic Semgrep AST Scan (Pass 0)</div>
+							<div class="t-sub">Run repository <code>.semgrep</code> rules before LLM evaluation</div>
+						</div>
+						<input type="checkbox" bind:checked={config.semgrep} />
+					</label>
 				</div>
 			</div>
 
-			<!-- Path Inclusions & Filters -->
 			<div class="card">
 				<div class="card-title">
 					<span class="badge-num">3</span>
 					<div>
 						<h3>File & Path Filters</h3>
-						<span class="hint">Exclude noise files from AI context window to save tokens</span>
+						<span class="hint">Exclude generated or lockfile noise from the review diff budget</span>
 					</div>
 				</div>
 
@@ -208,7 +173,7 @@
 					<label class="toggle-row">
 						<div>
 							<div class="t-name">Ignore Lockfiles</div>
-							<div class="t-sub"><code>!**/*.lock</code>, <code>flake.lock</code>, <code>Cargo.lock</code></div>
+							<div class="t-sub"><code>**/flake.lock</code>, <code>**/Cargo.lock</code>, <code>**/package-lock.json</code></div>
 						</div>
 						<input type="checkbox" bind:checked={config.ignore_lockfiles} />
 					</label>
@@ -216,22 +181,21 @@
 					<label class="toggle-row">
 						<div>
 							<div class="t-name">Ignore Vendored Dependencies</div>
-							<div class="t-sub"><code>!**/vendor/**</code>, <code>!**/node_modules/**</code></div>
+							<div class="t-sub"><code>**/vendor/**</code>, <code>**/node_modules/**</code></div>
 						</div>
 						<input type="checkbox" bind:checked={config.ignore_vendor} />
 					</label>
 
 					<label class="toggle-row">
 						<div>
-							<div class="t-name">Ignore Generated Artifacts</div>
-							<div class="t-sub"><code>!**/target/**</code>, <code>!**/dist/**</code>, <code>*.generated.*</code></div>
+							<div class="t-name">Ignore Build & Generated Artifacts</div>
+							<div class="t-sub"><code>target/**</code>, <code>**/dist/**</code>, <code>**/*.min.js</code></div>
 						</div>
 						<input type="checkbox" bind:checked={config.ignore_generated} />
 					</label>
 				</div>
 			</div>
 
-			<!-- Custom Instructions -->
 			<div class="card">
 				<div class="card-title">
 					<span class="badge-num">4</span>
@@ -244,27 +208,27 @@
 				<textarea
 					class="guidelines-input"
 					rows="4"
+					aria-label="Custom Architectural Guidelines"
 					placeholder="Enter rules, one per line..."
 					bind:value={config.custom_guidelines}
 				></textarea>
 			</div>
 		</div>
 
-		<!-- Right: Live Generated YAML Preview -->
 		<div class="preview-panel">
 			<div class="preview-card">
 				<div class="preview-header">
 					<div class="file-name">
-						<span>📄</span>
+						<span aria-hidden="true">📄</span>
 						<code>.revue.yaml</code>
 					</div>
-					<button class="copy-small-btn" onclick={copyYaml}>
+					<button type="button" class="copy-small-btn" onclick={copyYaml}>
 						{#if copied}Copied!{:else}Copy YAML{/if}
 					</button>
 				</div>
 				<pre class="yaml-code"><code>{generatedYaml}</code></pre>
 				<div class="preview-footer">
-					<span>💡 Place this file in your repository root to apply custom guidelines.</span>
+					<span>Place this file in your repository root or run <code>revue init</code>.</span>
 				</div>
 			</div>
 		</div>
@@ -286,8 +250,8 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 1.5rem 1.75rem;
-		background: #161b22;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.85rem;
 		flex-wrap: wrap;
 		gap: 1rem;
@@ -306,13 +270,13 @@
 	h2 {
 		font-size: 1.35rem;
 		font-weight: 700;
-		color: #f0f6fc;
+		color: var(--color-heading);
 		margin: 0;
 	}
 
 	.subtitle {
 		font-size: 0.875rem;
-		color: #8b949e;
+		color: var(--color-muted);
 		margin: 0.25rem 0 0 0;
 	}
 
@@ -335,22 +299,22 @@
 	}
 
 	.btn.primary {
-		background: #f97316;
-		color: white;
+		background: var(--color-accent);
+		color: var(--color-accent-fg);
 	}
 
 	.btn.primary:hover {
-		background: #ea580c;
+		background: var(--color-accent-hover);
 	}
 
 	.btn.outline {
-		background: #21262d;
-		border-color: rgba(255, 255, 255, 0.1);
-		color: #f0f6fc;
+		background: var(--color-surface-high);
+		border-color: var(--color-line);
+		color: var(--color-heading);
 	}
 
 	.btn.outline:hover {
-		background: #30363d;
+		border-color: var(--color-outline);
 	}
 
 	.wizard-grid {
@@ -373,8 +337,8 @@
 	}
 
 	.card {
-		background: #161b22;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.85rem;
 		padding: 1.5rem;
 		display: flex;
@@ -389,8 +353,8 @@
 	}
 
 	.badge-num {
-		background: rgba(249, 115, 22, 0.15);
-		color: #f97316;
+		background: var(--color-accent-soft);
+		color: var(--color-accent-soft-fg);
 		font-size: 0.8rem;
 		font-weight: 700;
 		width: 24px;
@@ -406,16 +370,15 @@
 	h3 {
 		font-size: 1.05rem;
 		font-weight: 600;
-		color: #f0f6fc;
+		color: var(--color-heading);
 		margin: 0;
 	}
 
 	.hint {
 		font-size: 0.8rem;
-		color: #8b949e;
+		color: var(--color-muted);
 	}
 
-	/* Profiles */
 	.profile-options {
 		display: flex;
 		flex-direction: column;
@@ -427,40 +390,39 @@
 		align-items: flex-start;
 		gap: 0.85rem;
 		padding: 0.85rem 1rem;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		border: 1px solid var(--color-line);
 		border-radius: 0.65rem;
-		background: #0d1117;
+		background: var(--color-bg);
 		cursor: pointer;
 		transition: all 0.15s ease;
 	}
 
 	.profile-card:hover {
-		border-color: rgba(249, 115, 22, 0.3);
+		border-color: var(--color-outline);
 	}
 
 	.profile-card.selected {
-		border-color: #f97316;
-		background: rgba(249, 115, 22, 0.05);
+		border-color: var(--color-accent);
+		background: var(--color-accent-soft);
 	}
 
 	.profile-card input {
 		margin-top: 3px;
-		accent-color: #f97316;
+		accent-color: var(--color-accent);
 	}
 
 	.p-title {
 		font-size: 0.9rem;
 		font-weight: 600;
-		color: #f0f6fc;
+		color: var(--color-heading);
 	}
 
 	.p-desc {
 		font-size: 0.8rem;
-		color: #8b949e;
+		color: var(--color-muted);
 		margin-top: 0.15rem;
 	}
 
-	/* Toggles */
 	.toggles-list {
 		display: flex;
 		flex-direction: column;
@@ -471,9 +433,10 @@
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
+		gap: 1rem;
 		padding: 0.75rem 1rem;
-		background: #0d1117;
-		border: 1px solid rgba(255, 255, 255, 0.06);
+		background: var(--color-bg);
+		border: 1px solid var(--color-line);
 		border-radius: 0.65rem;
 		cursor: pointer;
 	}
@@ -481,58 +444,52 @@
 	.toggle-row input {
 		width: 18px;
 		height: 18px;
-		accent-color: #f97316;
+		accent-color: var(--color-accent);
 		cursor: pointer;
+		flex-shrink: 0;
 	}
 
 	.t-name {
 		font-size: 0.875rem;
 		font-weight: 600;
-		color: #f0f6fc;
+		color: var(--color-heading);
 	}
 
 	.t-sub {
 		font-size: 0.775rem;
-		color: #8b949e;
+		color: var(--color-muted);
 		margin-top: 0.15rem;
 	}
 
 	.t-sub code {
-		background: rgba(255, 255, 255, 0.06);
+		background: var(--color-surface);
 		padding: 0.1rem 0.35rem;
 		border-radius: 0.25rem;
-		color: #58a6ff;
+		color: var(--color-accent-soft-fg);
 	}
 
-	/* Guidelines Textarea */
 	.guidelines-input {
 		width: 100%;
-		background: #0d1117;
-		border: 1px solid rgba(255, 255, 255, 0.1);
+		background: var(--color-bg);
+		border: 1px solid var(--color-line);
 		border-radius: 0.5rem;
 		padding: 0.85rem;
-		color: #f0f6fc;
-		font-family: ui-monospace, monospace;
+		color: var(--color-heading);
+		font-family: var(--font-mono);
 		font-size: 0.85rem;
 		line-height: 1.5;
 		resize: vertical;
-		outline: none;
 		box-sizing: border-box;
 	}
 
-	.guidelines-input:focus {
-		border-color: #f97316;
-	}
-
-	/* Preview Panel */
 	.preview-panel {
 		position: sticky;
 		top: 5rem;
 	}
 
 	.preview-card {
-		background: #161b22;
-		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
 		border-radius: 0.85rem;
 		overflow: hidden;
 		display: flex;
@@ -544,8 +501,8 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 0.85rem 1.15rem;
-		background: #0d1117;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--color-surface-high);
+		border-bottom: 1px solid var(--color-line);
 	}
 
 	.file-name {
@@ -554,13 +511,13 @@
 		gap: 0.5rem;
 		font-size: 0.85rem;
 		font-weight: 600;
-		color: #f0f6fc;
+		color: var(--color-heading);
 	}
 
 	.copy-small-btn {
-		background: #21262d;
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		color: #f0f6fc;
+		background: var(--color-surface);
+		border: 1px solid var(--color-line);
+		color: var(--color-heading);
 		padding: 0.25rem 0.65rem;
 		border-radius: 0.35rem;
 		font-size: 0.75rem;
@@ -569,26 +526,25 @@
 	}
 
 	.copy-small-btn:hover {
-		background: #30363d;
+		border-color: var(--color-outline);
 	}
 
 	.yaml-code {
 		padding: 1.25rem;
 		margin: 0;
-		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 		font-size: 0.825rem;
 		line-height: 1.5;
-		color: #e6edf3;
+		color: var(--color-heading);
 		overflow-x: auto;
-		background: #090d13;
+		background: var(--color-bg);
 		max-height: 480px;
 	}
 
 	.preview-footer {
 		padding: 0.85rem 1.15rem;
-		background: #0d1117;
-		border-top: 1px solid rgba(255, 255, 255, 0.08);
+		background: var(--color-surface-high);
+		border-top: 1px solid var(--color-line);
 		font-size: 0.775rem;
-		color: #8b949e;
+		color: var(--color-muted);
 	}
 </style>

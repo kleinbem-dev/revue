@@ -126,8 +126,8 @@ Add to your NixOS configuration:
           services.revue = {
             enable = true;
             listen = "0.0.0.0:8383";
-            user = "martin"; # Allows access to user credentials (~/.gemini or ~/.config)
-            environmentFile = "/run/secrets/revue.env"; # REVUE_WEBHOOK_SECRET, FORGEJO_TOKEN, etc.
+            user = "alice"; # Optional: access user-level CLI credentials (~/.gemini or ~/.config)
+            environmentFile = "/run/secrets/revue.env"; # REVUE_WEBHOOK_SECRET, FORGEJO_TOKEN, REVUE_API_KEY, etc.
           };
         }
       ];
@@ -136,12 +136,7 @@ Add to your NixOS configuration:
 }
 ```
 
-With `user` set, revue keeps its state in `/home/<user>/.local/share/revue`
-(always under `/home`, whatever the account's home directory), and persisting
-it is up to the host. On an impermanence host with an ephemeral
-`/home`, add it yourself, e.g.
-`environment.persistence."/nix/persist".users.martin.directories = [ ".local/share/revue" ];`.
-Without `user`, the module persists `/var/lib/private/revue` itself.
+With `user` set, `revue` stores state in `<user-home>/.local/share/revue` (resolved from `users.users.<user>.home`), and persisting it is up to the host. On an impermanence host with an ephemeral `/home`, persist `.local/share/revue` for that user. Without `user`, the module runs with `DynamicUser = true` and persists `/var/lib/private/revue` automatically when `environment.persistence` is present.
 
 ---
 
@@ -168,7 +163,7 @@ Trigger a review on any Pull Request:
 revue pr 42 --dry-run
 
 # Post comments directly to Forgejo / GitHub
-revue pr 42 --repo kleinbem/nix-config
+revue pr 42 --repo owner/repo
 ```
 
 ### Webhook Daemon Mode
@@ -222,7 +217,7 @@ version: 1
 forge:
   # Supported: auto, forgejo, gitea, github
   type: auto
-  url: "https://git.kleinbem.dev"
+  # url: "https://forgejo.example.com"
   # webhook_secret: "override-secret-here" # Or set REVUE_WEBHOOK_SECRET
 
 providers:

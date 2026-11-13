@@ -45,7 +45,7 @@ enum Commands {
         /// Pull request index / number
         index: u64,
 
-        /// Forge repository (e.g. kleinbem/nix-config)
+        /// Forge repository (e.g. owner/repo)
         #[arg(short, long)]
         repo: Option<String>,
 
@@ -86,7 +86,7 @@ enum Commands {
 
     /// Synthesize a Semgrep rule from a code review finding (AI-Learns-Once)
     LearnRule {
-        /// Target repository (e.g. kleinbem/nix-config)
+        /// Target repository (e.g. owner/repo)
         #[arg(short, long)]
         repo: String,
 
@@ -115,7 +115,9 @@ enum Commands {
 /// Entry point for the revue CLI and daemon.
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Keep stdout clean for `revue mcp` JSON-RPC frames and `--format json` output.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "revue=info,nix_revue=info,tower_http=info".into()),

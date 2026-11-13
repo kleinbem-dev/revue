@@ -1,148 +1,152 @@
-use regex::Regex;
+use regex::{Captures, Regex};
 use std::sync::LazyLock;
 use tracing::info;
 
-pub struct RedactionRule {
-    pub name: &'static str,
-    pub regex: LazyLock<Regex>,
+enum RuleReplacement {
+    Marker(&'static str),
+    UriPassword,
+    AwsSecret,
+    CredentialAssignment,
 }
 
-static RULES: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+static RULES: LazyLock<Vec<(Regex, RuleReplacement)>> = LazyLock::new(|| {
     vec![
-        // 1. Private Keys
         (
-            "PRIVATE_KEY",
-            Regex::new(r"(?s)-----BEGIN [A-Z0-9 ]+PRIVATE KEY-----.*?-----END [A-Z0-9 ]+PRIVATE KEY-----")
-                .unwrap(),
+            Regex::new(
+                r"(?s)-----BEGIN [A-Z0-9 ]+PRIVATE KEY-----.*?-----END [A-Z0-9 ]+PRIVATE KEY-----",
+            )
+            .unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:PRIVATE_KEY]"),
         ),
-        // 2. GitHub Personal Access & App Tokens
         (
-            "GITHUB_TOKEN",
-            Regex::new(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}\b|\bgithub_pat_[A-Za-z0-9_]{82}\b")
-                .unwrap(),
+            Regex::new(
+                r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}\b|\bgithub_pat_[A-Za-z0-9_]{82}\b",
+            )
+            .unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:GITHUB_TOKEN]"),
         ),
-        // 3. AWS Access Key IDs
         (
-            "AWS_ACCESS_KEY",
+            Regex::new(r"\bglpat-[0-9a-zA-Z_\-]{20,}\b").unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:GITLAB_TOKEN]"),
+        ),
+        (
             Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:AWS_ACCESS_KEY]"),
         ),
-        // 4. AWS Secret Access Keys
         (
-            "AWS_SECRET_KEY",
-            Regex::new(r#"(?i)\b(?:aws_secret_access_key|aws_secret_key)\b\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})["']?"#)
-                .unwrap(),
+            Regex::new(
+                r#"(?i)\b(?:aws_secret_access_key|aws_secret_key)\b\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})["']?"#,
+            )
+            .unwrap(),
+            RuleReplacement::AwsSecret,
         ),
-        // 5. Google API / AI Studio Keys
         (
-            "GOOGLE_API_KEY",
             Regex::new(r"\bAIza[0-9A-Za-z\-_]{35}\b").unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:GOOGLE_API_KEY]"),
         ),
-        // 6. Anthropic API Keys
         (
-            "ANTHROPIC_KEY",
             Regex::new(r"\bsk-ant-[a-zA-Z0-9_\-]{32,}\b").unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:ANTHROPIC_KEY]"),
         ),
-        // 7. OpenAI API Keys (legacy sk-... and modern sk-proj-... / sk-admin-...)
         (
-            "OPENAI_KEY",
             Regex::new(r"\bsk-(?:proj-|admin-)?[a-zA-Z0-9_\-]{20,}\b").unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:OPENAI_KEY]"),
         ),
-        // 8. Slack Tokens
         (
-            "SLACK_TOKEN",
-            Regex::new(r"\bxox[baprs]-[0-9a-zA-Z]{10,48}\b").unwrap(),
+            Regex::new(r"\bxox[baprs]-[0-9a-zA-Z\-]{10,128}\b").unwrap(),
+            RuleReplacement::Marker("[REDACTED_SECRET:SLACK_TOKEN]"),
         ),
-        // 9. Database / Service URI Credentials (e.g. postgres://user:password@host)
         (
-            "URI_CREDENTIALS",
-            Regex::new(r"(?i)([a-z]+://[^:\s]+:)([^@\s/]+)(@[^/\s]+)").unwrap(),
-        ),
-        // 10. Generic key/password assignments in diffs (quoted JSON/YAML, unquoted .env, or assignments)
-        (
-            "CREDENTIAL_ASSIGNMENT",
-            Regex::new(r#"(?i)(?:"(?:password|secret_key|api_key|auth_token|client_secret|access_token|private_key|token)"|'(?:password|secret_key|api_key|auth_token|client_secret|access_token|private_key|token)'|\b(?:password|secret_key|api_key|auth_token|client_secret|access_token|private_key|token)\b)\s*[:=]\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|([^"'\s\r\n]{8,}))"#)
+            Regex::new(r"(?i)\bBearer\s+eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
                 .unwrap(),
+            RuleReplacement::Marker("Bearer [REDACTED_SECRET:JWT]"),
+        ),
+        (
+            Regex::new(r"(?i)([a-z]+://[^:\s]+:)([^@\s/]+)(@[^/\s]+)").unwrap(),
+            RuleReplacement::UriPassword,
+        ),
+        (
+            Regex::new(
+                r#"(?i)(?:"(?:password|secret_key|api_key|auth_token|client_secret|access_token|private_key|token)"|'(?:password|secret_key|api_key|auth_token|client_secret|access_token|private_key|token)'|\b(?:password|secret_key|api_key|auth_token|client_secret|access_token|private_key|token)\b)\s*[:=]\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^"\\]*)*)'|([^"'\s\r\n]{8,}))"#,
+            )
+            .unwrap(),
+            RuleReplacement::CredentialAssignment,
         ),
     ]
 });
 
-/// Redacts sensitive credentials, private keys, and tokens from diff text before dispatching to LLM providers.
+fn is_complete_marker(v: &str) -> bool {
+    v.starts_with("[REDACTED_SECRET:")
+        && v.ends_with(']')
+        && v.len() > "[REDACTED_SECRET:]".len()
+        && v["[REDACTED_SECRET:".len()..v.len() - 1]
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b == b'_')
+}
+
+/// Redacts credentials, private keys, and tokens from text before dispatching to LLM providers.
 /// Returns the sanitized string and the number of secrets redacted.
 pub fn scrub_diff(diff: &str) -> (String, usize) {
     let mut sanitized = diff.to_string();
     let mut total_redacted = 0;
 
-    for (name, re) in RULES.iter() {
-        if *name == "URI_CREDENTIALS" {
-            let matches: Vec<_> = re.find_iter(&sanitized).collect();
-            if !matches.is_empty() {
-                total_redacted += matches.len();
-                sanitized = re
-                    .replace_all(&sanitized, |caps: &regex::Captures| {
-                        format!("{}[REDACTED_SECRET:URI_PASSWORD]{}", &caps[1], &caps[3])
-                    })
-                    .to_string();
-            }
-        } else if *name == "AWS_SECRET_KEY" {
-            let matches: Vec<_> = re.find_iter(&sanitized).collect();
-            if !matches.is_empty() {
-                total_redacted += matches.len();
-                sanitized = re
-                    .replace_all(&sanitized, |caps: &regex::Captures| {
-                        let m0 = caps.get(0).unwrap();
-                        let m = caps.get(1).unwrap();
-                        let full = m0.as_str();
-                        let s = m.start() - m0.start();
-                        let e = m.end() - m0.start();
-                        format!("{}[REDACTED_SECRET:AWS_SECRET_KEY]{}", &full[..s], &full[e..])
-                    })
-                    .to_string();
-            }
-        } else if *name == "CREDENTIAL_ASSIGNMENT" {
-            let mut count = 0;
-            sanitized = re
-                .replace_all(&sanitized, |caps: &regex::Captures| {
-                    let m0 = caps.get(0).unwrap();
-                    let m = caps
+    for (re, kind) in RULES.iter() {
+        let mut rule_hits = 0usize;
+        let replaced = match kind {
+            RuleReplacement::Marker(marker) => re.replace_all(&sanitized, |_: &Captures| {
+                rule_hits += 1;
+                *marker
+            }),
+            RuleReplacement::UriPassword => re.replace_all(&sanitized, |caps: &Captures| {
+                let secret = &caps[2];
+                if is_complete_marker(secret) {
+                    return caps[0].to_string();
+                }
+                rule_hits += 1;
+                format!("{}[REDACTED_SECRET:URI_PASSWORD]{}", &caps[1], &caps[3])
+            }),
+            RuleReplacement::AwsSecret => re.replace_all(&sanitized, |caps: &Captures| {
+                let secret = &caps[1];
+                if is_complete_marker(secret) {
+                    return caps[0].to_string();
+                }
+                rule_hits += 1;
+                caps[0].replace(secret, "[REDACTED_SECRET:AWS_SECRET_KEY]")
+            }),
+            RuleReplacement::CredentialAssignment => {
+                re.replace_all(&sanitized, |caps: &Captures| {
+                    let full = &caps[0];
+                    let val = caps
                         .get(1)
                         .or_else(|| caps.get(2))
                         .or_else(|| caps.get(3))
-                        .unwrap();
-                    let val = m.as_str().trim();
-                    let is_exact_marker = val
-                        .strip_prefix("[REDACTED_SECRET:")
-                        .and_then(|inner| inner.strip_suffix(']'))
-                        .map(|name| {
-                            !name.is_empty()
-                                && name
-                                    .chars()
-                                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-                        })
-                        .unwrap_or(false);
-                    if is_exact_marker {
-                        return m0.as_str().to_string();
+                        .map(|m| m.as_str())
+                        .unwrap_or("");
+                    if val.len() < 8 || is_complete_marker(val) {
+                        return full.to_string();
                     }
-                    count += 1;
-                    let full = m0.as_str();
-                    let s = m.start() - m0.start();
-                    let e = m.end() - m0.start();
-                    format!("{}[REDACTED_SECRET:CREDENTIAL]{}", &full[..s], &full[e..])
+                    rule_hits += 1;
+                    if let Some(pos) = full.rfind(val) {
+                        format!(
+                            "{}[REDACTED_SECRET:CREDENTIAL]{}",
+                            &full[..pos],
+                            &full[pos + val.len()..]
+                        )
+                    } else {
+                        full.to_string()
+                    }
                 })
-                .to_string();
-            total_redacted += count;
-        } else {
-            let matches: Vec<_> = re.find_iter(&sanitized).collect();
-            if !matches.is_empty() {
-                total_redacted += matches.len();
-                let replacement = format!("[REDACTED_SECRET:{}]", name);
-                sanitized = re.replace_all(&sanitized, replacement.as_str()).to_string();
             }
+        };
+        if rule_hits > 0 {
+            total_redacted += rule_hits;
+            sanitized = replaced.into_owned();
         }
     }
 
     if total_redacted > 0 {
         info!(
-            "DLP Guard: Redacted {} sensitive secret(s) from diff prior to LLM analysis",
+            "DLP Scrubber redacted {} sensitive secret(s) prior to LLM dispatch",
             total_redacted
         );
     }
@@ -150,10 +154,9 @@ pub fn scrub_diff(diff: &str) -> (String, usize) {
     (sanitized, total_redacted)
 }
 
-/// Convenience helper to redact sensitive secrets from arbitrary text (e.g. PR descriptions, comment threads).
+/// Scrubs arbitrary freeform text (PR descriptions, comments, guidelines) and returns the sanitized string.
 pub fn scrub_text(text: &str) -> String {
-    let (scrubbed, _) = scrub_diff(text);
-    scrubbed
+    scrub_diff(text).0
 }
 
 #[cfg(test)]
@@ -175,8 +178,6 @@ mod tests {
 
     #[test]
     fn test_scrub_api_keys() {
-        // Made-up keys in the shapes the scrubber matches; concat! leaves room
-        // for the gitleaks:allow markers without changing the diff.
         let diff = concat!(
             "\n",
             "+const GITHUB_TOKEN = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz1234\";\n",
@@ -197,8 +198,11 @@ mod tests {
         let diff = r#"+DATABASE_URL="postgres://admin:super_secret_password_123@db.example.com:5432/revue""#;
         let (scrubbed, count) = scrub_diff(diff);
         assert_eq!(count, 1);
-        assert!(scrubbed
-            .contains("postgres://admin:[REDACTED_SECRET:URI_PASSWORD]@db.example.com:5432/revue"));
+        assert!(
+            scrubbed.contains(
+                "postgres://admin:[REDACTED_SECRET:URI_PASSWORD]@db.example.com:5432/revue"
+            )
+        );
         assert!(!scrubbed.contains("super_secret_password_123"));
     }
 
@@ -220,12 +224,18 @@ mod tests {
         let phrase_diff = r#"+password: "my secret pass phrase with spaces""#; // gitleaks:allow
         let (scrubbed_phrase, count) = scrub_diff(phrase_diff);
         assert_eq!(count, 1);
-        assert_eq!(scrubbed_phrase, r#"+password: "[REDACTED_SECRET:CREDENTIAL]""#);
+        assert_eq!(
+            scrubbed_phrase,
+            r#"+password: "[REDACTED_SECRET:CREDENTIAL]""#
+        );
 
         let substring_diff = r#"+secret_key: "secret_key_12345678""#; // gitleaks:allow
         let (scrubbed_sub, count) = scrub_diff(substring_diff);
         assert_eq!(count, 1);
-        assert_eq!(scrubbed_sub, r#"+secret_key: "[REDACTED_SECRET:CREDENTIAL]""#);
+        assert_eq!(
+            scrubbed_sub,
+            r#"+secret_key: "[REDACTED_SECRET:CREDENTIAL]""#
+        );
 
         let token_diff = r#"+token: "custom_auth_token_xyz""#; // gitleaks:allow
         let (scrubbed_token, count) = scrub_diff(token_diff);
@@ -257,5 +267,25 @@ mod tests {
         let (clean2, count2) = scrub_diff(marker_shaped);
         assert_eq!(count2, 1);
         assert_eq!(clean2, r#"password: "[REDACTED_SECRET:CREDENTIAL]""#);
+    }
+
+    #[test]
+    fn test_scrub_multibyte_utf8_and_additional_token_families() {
+        let slack = format!("xoxb-{}-{}", "123456789012", "abcdefghijklmnopqrstuvwx");
+        let gitlab = format!("glpat-{}", "1234567890abcdefghij");
+        let anthropic = format!("sk-ant-api03-{}", "a".repeat(32));
+        let jwt = format!(
+            "Bearer eyJhbGciOiJIUzI1NiJ9.{}.{}",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        );
+        let line = format!("+// 🔐 Tokens: {slack} | {gitlab} | {anthropic} | {jwt}\n");
+
+        let (scrubbed, count) = scrub_diff(&line);
+        assert_eq!(count, 4, "got {count}: {scrubbed}");
+        assert!(scrubbed.contains("🔐 Tokens:"));
+        assert!(!scrubbed.contains("abcdefghijklmnopqrstuvwx"));
+        assert!(!scrubbed.contains(&gitlab));
+        assert!(!scrubbed.contains(&anthropic));
+        assert!(!scrubbed.contains("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"));
     }
 }
