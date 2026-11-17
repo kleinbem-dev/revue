@@ -42,7 +42,7 @@ let
     src = "${localSrc}/web";
 
     npmDepsFetcherVersion = 2;
-    npmDepsHash = "sha256-I0JRIFadX29DcfRj4aAv9h3mT4fGWwXdMHL6estSqX0=";
+    npmDepsHash = "sha256-jFNeOEXJQXtDderKY4YfbV/VpAiWdSAMszGsrb9MQcs=";
 
     strictDeps = true;
     __structuredAttrs = true;
