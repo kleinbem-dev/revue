@@ -867,7 +867,7 @@ async fn spawn_review_job(
                 pass2_verified: 0,
                 duration_secs: 0,
                 provider_used: provider_hint,
-                created_at: chrono::Utc::now().to_rfc3339(),
+                created_at: crate::db::now_rfc3339(),
                 summary: if cur_publish {
                     "Two-pass review executing (live publishing enabled).".to_string()
                 } else {
