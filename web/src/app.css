@@ -3,8 +3,6 @@
 @import "@kleinbem/web-config/base.css";
 @source "../node_modules/@kleinbem/web-config";
 
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *, .dark, .dark *));
-
 dialog:modal {
 	overscroll-behavior: contain;
 }
