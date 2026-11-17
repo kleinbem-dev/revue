@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check": "web-config check && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
   },
   "devDependencies": {
@@ -32,6 +32,6 @@
     "#lib/*": "./src/lib/*"
   },
   "dependencies": {
-    "@kleinbem/web-config": "git+https://github.com/kleinbem/web-config.git#main"
+    "@kleinbem/web-config": "github:kleinbem/web-config#v0.2.0"
   }
 }
