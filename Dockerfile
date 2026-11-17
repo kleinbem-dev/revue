@@ -7,7 +7,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm test && npm run check && npm run build
 
-FROM rust:1.98-alpine AS builder
+FROM rust:1.99-alpine AS builder
 
 WORKDIR /app
 RUN apk add --no-cache musl-dev pkgconf sqlite-dev sqlite-static
@@ -23,7 +23,7 @@ RUN target="$(rustc -vV | sed -n 's|host: ||p')" \
     && cargo build --release --target "$target" \
     && cp "target/$target/release/revue" /usr/local/bin/revue
 
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates git bash sqlite-libs \
     && addgroup -S -g 10001 revue \
