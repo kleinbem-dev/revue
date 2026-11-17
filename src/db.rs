@@ -1,10 +1,18 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use jiff::{Timestamp, tz::Offset};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, SqlitePool};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
+
+/// Current UTC time as RFC 3339 with a `+00:00` offset, the format every stored
+/// `created_at` has; rows sort by this text.
+pub fn now_rfc3339() -> String {
+    Timestamp::now()
+        .display_with_offset(Offset::UTC)
+        .to_string()
+}
 
 #[derive(Clone)]
 pub enum DbPool {
@@ -239,7 +247,7 @@ impl DbPool {
 
     /// Records an executed review run and returns its primary key.
     pub async fn record_review(&self, rec: &NewReviewRecord<'_>) -> Result<i64> {
-        let now = Utc::now().to_rfc3339();
+        let now = now_rfc3339();
         let sql = r#"
             INSERT INTO reviews (repo, pr_number, title, author, status, provider_used,
                                  pass1_candidates, pass2_filtered, verified_findings,
@@ -313,7 +321,7 @@ impl DbPool {
         feedback_type: &str,
         reason: Option<&str>,
     ) -> Result<i64> {
-        let now = Utc::now().to_rfc3339();
+        let now = now_rfc3339();
         let sql = r#"
             INSERT INTO findings_feedback (repo, file_path, issue_title, feedback_type, reason, created_at)
             VALUES ($1, $2, $3, $4, $5, $6)
@@ -418,6 +426,24 @@ impl DbPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn now_rfc3339_matches_stored_format() {
+        let now = now_rfc3339();
+        // e.g. 2026-11-17T11:02:03.123456789+00:00, as chrono wrote it before.
+        let (stamp, offset) = now.split_at(now.len() - 6);
+        assert_eq!(offset, "+00:00", "{now}");
+        let (date, time) = stamp.split_once('T').expect("date and time");
+        assert_eq!(date.len(), 10, "{now}");
+        assert_eq!(
+            &time[..8].replace(|c: char| c.is_ascii_digit(), "0"),
+            "00:00:00",
+            "{now}"
+        );
+        assert!(time.len() == 8 || time.as_bytes()[8] == b'.', "{now}");
+        // Text order must stay time order next to rows written earlier.
+        assert!(now.as_str() > "2026-01-01T00:00:00+00:00");
+    }
 
     #[tokio::test]
     async fn test_sqlite_in_memory_lifecycle() {
