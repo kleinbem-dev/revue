@@ -66,6 +66,11 @@ pub trait Forge: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Resolve a token suitable for authenticated git HTTPS fetches, if available.
+    async fn git_token(&self, _repo: &str) -> Option<String> {
+        None
+    }
+
     /// Post an inline code review with comments and summary
     async fn post_review(
         &self,
@@ -91,6 +96,33 @@ pub(crate) fn build_http_client(auth_header_value: Option<String>) -> Result<req
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))
+}
+
+/// Encodes `input` as RFC 4648 base64 (standard with `=` padding, or unpadded URL-safe).
+pub(crate) fn base64_encode(input: &[u8], url_safe: bool) -> String {
+    const STD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let alphabet = if url_safe { URL } else { STD };
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(alphabet[((n >> 18) & 0x3f) as usize] as char);
+        out.push(alphabet[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(alphabet[((n >> 6) & 0x3f) as usize] as char);
+        } else if !url_safe {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(alphabet[(n & 0x3f) as usize] as char);
+        } else if !url_safe {
+            out.push('=');
+        }
+    }
+    out
 }
 
 pub(crate) fn parse_pr_metadata_json(

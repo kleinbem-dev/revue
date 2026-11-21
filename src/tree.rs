@@ -140,11 +140,47 @@ impl AsRef<Path> for EphemeralTreeGuard {
     }
 }
 
+fn rewrite_github_ssh_to_https(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim();
+    let rest = trimmed
+        .strip_prefix("git@github.com:")
+        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| trimmed.strip_prefix("https://github.com/"))?;
+    let slug = rest.trim_matches('/').trim_end_matches(".git");
+    if slug.is_empty() || !slug.contains('/') {
+        return None;
+    }
+    Some(format!("https://github.com/{}.git", slug))
+}
+
+async fn resolve_fetch_remote(repo_root: &Path) -> String {
+    if let Ok(Ok(out)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        isolated_tokio_git(repo_root)
+            .args(["remote", "get-url", "origin"])
+            .output(),
+    )
+    .await
+        && out.status.success()
+    {
+        let raw = String::from_utf8_lossy(&out.stdout);
+        if let Some(https_url) = rewrite_github_ssh_to_https(&raw) {
+            return https_url;
+        }
+    }
+    "origin".to_string()
+}
+
 impl EphemeralTreeGuard {
     /// Extracts a clean tree for `head_sha` into a temporary directory without modifying working copies.
-    pub async fn prepare(repo_name: &str, head_sha: &str, pr_number: Option<u64>) -> Option<Self> {
+    pub async fn prepare(
+        repo_name: &str,
+        head_sha: &str,
+        pr_number: Option<u64>,
+        git_token: Option<&str>,
+    ) -> Option<Self> {
         let repo_root = resolve_repo_root(repo_name)?;
-        Self::prepare_from_root(&repo_root, repo_name, head_sha, pr_number).await
+        Self::prepare_from_root(&repo_root, repo_name, head_sha, pr_number, git_token).await
     }
 
     pub(crate) async fn prepare_from_root(
@@ -152,6 +188,7 @@ impl EphemeralTreeGuard {
         repo_name: &str,
         head_sha: &str,
         pr_number: Option<u64>,
+        git_token: Option<&str>,
     ) -> Option<Self> {
         // Reject invalid or non-hexadecimal git SHAs
         if head_sha.len() < 7
@@ -179,20 +216,36 @@ impl EphemeralTreeGuard {
         };
 
         if !has_commit {
+            let remote = resolve_fetch_remote(repo_root).await;
             let mut fetch_cmd = isolated_tokio_git(repo_root);
             fetch_cmd
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .env("GIT_ASKPASS", "");
 
+            if remote.starts_with("https://github.com/")
+                && let Some(tok) = git_token.map(str::trim).filter(|t| !t.is_empty())
+            {
+                let basic = crate::forges::base64_encode(
+                    format!("x-access-token:{}", tok).as_bytes(),
+                    false,
+                );
+                fetch_cmd
+                    .env(
+                        "REVUE_GIT_AUTH_HEADER",
+                        format!("AUTHORIZATION: basic {}", basic),
+                    )
+                    .arg("--config-env=http.https://github.com/.extraHeader=REVUE_GIT_AUTH_HEADER");
+            }
+
             if let Some(pr) = pr_number {
                 info!(
-                    "Commit '{}' not found in local repo; fetching pull/{}/head from origin...",
-                    head_sha, pr
+                    "Commit '{}' not found in local repo; fetching pull/{}/head from {}...",
+                    head_sha, pr, remote
                 );
                 let refspec = format!("refs/pull/{}/head", pr);
-                fetch_cmd.args(["fetch", "origin", &refspec]);
+                fetch_cmd.args(["fetch", &remote, &refspec]);
             } else {
-                fetch_cmd.args(["fetch", "origin", head_sha]);
+                fetch_cmd.args(["fetch", &remote, head_sha]);
             }
 
             fetch_cmd.kill_on_drop(true);
@@ -439,10 +492,15 @@ mod tests {
             .to_string();
 
         let extracted_path = {
-            let guard =
-                EphemeralTreeGuard::prepare_from_root(&repo_dir, "owner/demo-repo", &sha, None)
-                    .await
-                    .expect("tree extraction should succeed");
+            let guard = EphemeralTreeGuard::prepare_from_root(
+                &repo_dir,
+                "owner/demo-repo",
+                &sha,
+                None,
+                None,
+            )
+            .await
+            .expect("tree extraction should succeed");
             let root = guard.as_ref().to_path_buf();
             assert!(root.join("src/lib.rs").is_file());
             // Regardless of host core.symlinks, escape_link.rs must never resolve to /etc/hosts.
@@ -470,5 +528,29 @@ mod tests {
             "ephemeral checkout must be deleted when guard drops"
         );
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn rewrites_github_ssh_and_https_remotes_to_https() {
+        assert_eq!(
+            rewrite_github_ssh_to_https("git@github.com:kleinbem/nix-toolbox.git").as_deref(),
+            Some("https://github.com/kleinbem/nix-toolbox.git")
+        );
+        assert_eq!(
+            rewrite_github_ssh_to_https("ssh://git@github.com/kleinbem-dev/revue").as_deref(),
+            Some("https://github.com/kleinbem-dev/revue.git")
+        );
+        assert_eq!(
+            rewrite_github_ssh_to_https("https://github.com/kleinbem/nix-config.git").as_deref(),
+            Some("https://github.com/kleinbem/nix-config.git")
+        );
+        assert_eq!(
+            rewrite_github_ssh_to_https("https://github.com/kleinbem/nix-config.git/").as_deref(),
+            Some("https://github.com/kleinbem/nix-config.git")
+        );
+        assert_eq!(
+            rewrite_github_ssh_to_https("ssh://git@git.kleinbem.dev/kleinbem/repo.git"),
+            None
+        );
     }
 }

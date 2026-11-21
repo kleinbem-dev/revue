@@ -994,8 +994,9 @@ pub async fn execute_review_pipeline(
             intent,
             repo_guidelines.as_deref(),
         );
-        let (resp, prov) = chain.complete_with_fallback(&prompt).await?;
-        let mut parsed = parse_review_response(&resp)?;
+        let (mut parsed, prov) = chain
+            .complete_and_parse_with_fallback(&prompt, parse_review_response)
+            .await?;
         merge_pass0_findings(&mut parsed, active_pass0);
         let raw_count = parsed.issues.len();
         filter_issues(&mut parsed.issues, config);
@@ -1037,9 +1038,14 @@ pub async fn execute_review_pipeline(
         existing_comments,
         repo_guidelines.as_deref(),
     );
-    let (pass2_response, _) = chain.complete_with_fallback(&pass2_prompt).await?;
-
-    let mut review = parse_review_response(&pass2_response)?;
+    let (mut review, pass2_provider) = chain
+        .complete_and_parse_with_fallback(&pass2_prompt, parse_review_response)
+        .await?;
+    let used_provider = if pass2_provider == provider_name {
+        provider_name
+    } else {
+        format!("{} -> {}", provider_name, pass2_provider)
+    };
     merge_pass0_findings(&mut review, active_pass0);
     filter_issues(&mut review.issues, config);
 
@@ -1049,7 +1055,7 @@ pub async fn execute_review_pipeline(
     Ok(ReviewExecutionResult {
         summary: review.summary,
         issues: review.issues,
-        provider_used: provider_name,
+        provider_used: used_provider,
         pass1_candidates: candidates_count,
         pass2_verified: verified_count,
         duration_ms,
@@ -1404,7 +1410,14 @@ pub async fn run_pr_review(
 
     // Ephemeral checkout at the exact PR head SHA for Semgrep and disk context
     let tree_guard = if !metadata.head_sha.is_empty() {
-        crate::tree::EphemeralTreeGuard::prepare(repo, &metadata.head_sha, Some(index)).await
+        let git_token = forge.git_token(repo).await;
+        crate::tree::EphemeralTreeGuard::prepare(
+            repo,
+            &metadata.head_sha,
+            Some(index),
+            git_token.as_deref(),
+        )
+        .await
     } else {
         None
     };

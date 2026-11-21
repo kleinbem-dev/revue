@@ -25,7 +25,7 @@ RUN target="$(rustc -vV | sed -n 's|host: ||p')" \
 
 FROM alpine:3.24
 
-RUN apk add --no-cache ca-certificates git bash sqlite-libs \
+RUN apk add --no-cache ca-certificates git bash openssl sqlite-libs \
     && addgroup -S -g 10001 revue \
     && adduser -S -u 10001 -G revue -h /var/lib/revue -s /bin/sh revue \
     && mkdir -p /var/lib/revue /usr/local/share/revue/web \
