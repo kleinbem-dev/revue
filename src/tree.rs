@@ -146,7 +146,7 @@ fn rewrite_github_ssh_to_https(remote_url: &str) -> Option<String> {
         .strip_prefix("git@github.com:")
         .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
         .or_else(|| trimmed.strip_prefix("https://github.com/"))?;
-    let slug = rest.trim_start_matches('/').trim_end_matches(".git");
+    let slug = rest.trim_matches('/').trim_end_matches(".git");
     if slug.is_empty() || !slug.contains('/') {
         return None;
     }
@@ -230,12 +230,11 @@ impl EphemeralTreeGuard {
                     false,
                 );
                 fetch_cmd
-                    .env("GIT_CONFIG_COUNT", "1")
-                    .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
                     .env(
-                        "GIT_CONFIG_VALUE_0",
+                        "REVUE_GIT_AUTH_HEADER",
                         format!("AUTHORIZATION: basic {}", basic),
-                    );
+                    )
+                    .arg("--config-env=http.https://github.com/.extraHeader=REVUE_GIT_AUTH_HEADER");
             }
 
             if let Some(pr) = pr_number {
@@ -543,6 +542,10 @@ mod tests {
         );
         assert_eq!(
             rewrite_github_ssh_to_https("https://github.com/kleinbem/nix-config.git").as_deref(),
+            Some("https://github.com/kleinbem/nix-config.git")
+        );
+        assert_eq!(
+            rewrite_github_ssh_to_https("https://github.com/kleinbem/nix-config.git/").as_deref(),
             Some("https://github.com/kleinbem/nix-config.git")
         );
         assert_eq!(

@@ -1038,9 +1038,14 @@ pub async fn execute_review_pipeline(
         existing_comments,
         repo_guidelines.as_deref(),
     );
-    let (mut review, _) = chain
+    let (mut review, pass2_provider) = chain
         .complete_and_parse_with_fallback(&pass2_prompt, parse_review_response)
         .await?;
+    let used_provider = if pass2_provider == provider_name {
+        provider_name
+    } else {
+        format!("{} -> {}", provider_name, pass2_provider)
+    };
     merge_pass0_findings(&mut review, active_pass0);
     filter_issues(&mut review.issues, config);
 
@@ -1050,7 +1055,7 @@ pub async fn execute_review_pipeline(
     Ok(ReviewExecutionResult {
         summary: review.summary,
         issues: review.issues,
-        provider_used: provider_name,
+        provider_used: used_provider,
         pass1_candidates: candidates_count,
         pass2_verified: verified_count,
         duration_ms,

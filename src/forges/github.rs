@@ -138,12 +138,14 @@ async fn mint_app_jwt(app_id: &str, private_key_pem: &str, now_secs: i64) -> Res
     let signing_input = format!("{}.{}", hdr, payload);
 
     let key_file = write_temp_pem(private_key_pem).await?;
-    let mut child = tokio::process::Command::new("openssl")
-        .args(["dgst", "-sha256", "-sign"])
+    let mut cmd = tokio::process::Command::new("openssl");
+    cmd.args(["dgst", "-sha256", "-sign"])
         .arg(&key_file.path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("Failed to spawn openssl for GitHub App JWT: {}", e))?;
 
