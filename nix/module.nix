@@ -147,6 +147,7 @@ in
             pkgs.git
             pkgs.jujutsu
             pkgs.bash
+            pkgs.openssl
           ]
           ++ lib.optionals (cfg.user != null) [
             "/etc/profiles/per-user/${cfg.user}"
