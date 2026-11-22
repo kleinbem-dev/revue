@@ -246,17 +246,25 @@ async fn fetch_refspec_into_bare(
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "");
 
-    if remote_url.starts_with("https://github.com/")
+    if remote_url.starts_with("https://")
         && let Some(tok) = git_token.map(str::trim).filter(|t| !t.is_empty())
     {
         let basic =
             crate::forges::base64_encode(format!("x-access-token:{}", tok).as_bytes(), false);
+        let origin_prefix = remote_url
+            .match_indices('/')
+            .nth(2)
+            .map(|(idx, _)| &remote_url[..=idx])
+            .unwrap_or("https://");
         fetch_cmd
             .env(
                 "REVUE_GIT_AUTH_HEADER",
                 format!("AUTHORIZATION: basic {}", basic),
             )
-            .arg("--config-env=http.https://github.com/.extraHeader=REVUE_GIT_AUTH_HEADER");
+            .arg(format!(
+                "--config-env=http.{}.extraHeader=REVUE_GIT_AUTH_HEADER",
+                origin_prefix
+            ));
     } else if !remote_url.starts_with("http://")
         && !remote_url.starts_with("https://")
         && let Some(ssh_cmd) = ssh_command
