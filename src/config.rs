@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevueConfig {
@@ -284,7 +284,7 @@ impl RevueConfig {
             }
         }
 
-        info!("No configuration file found. Using default fleet settings.");
+        debug!("No configuration file found. Using default fleet settings.");
         Ok(Self::default())
     }
 
