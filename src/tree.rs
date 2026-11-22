@@ -153,22 +153,55 @@ fn rewrite_github_ssh_to_https(remote_url: &str) -> Option<String> {
     Some(format!("https://github.com/{}.git", slug))
 }
 
-async fn resolve_fetch_remote(repo_root: &Path) -> String {
-    if let Ok(Ok(out)) = tokio::time::timeout(
-        Duration::from_secs(5),
-        isolated_tokio_git(repo_root)
-            .args(["remote", "get-url", "origin"])
+async fn resolve_fetch_remote_url(repo_root: Option<&Path>, repo_name: &str) -> Option<String> {
+    if let Some(root) = repo_root
+        && let Ok(Ok(out)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            isolated_tokio_git(root)
+                .args(["remote", "get-url", "origin"])
+                .output(),
+        )
+        .await
+        && out.status.success()
+    {
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if let Some(https_url) = rewrite_github_ssh_to_https(&raw) {
+            return Some(https_url);
+        }
+        if !raw.is_empty() {
+            return Some(raw);
+        }
+    }
+
+    if repo_name.split('/').count() == 2 {
+        return Some(format!("https://github.com/{}.git", repo_name));
+    }
+
+    None
+}
+
+async fn has_git_commit(git_dir: &Path, head_sha: &str) -> bool {
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        isolated_tokio_git(git_dir)
+            .args(["cat-file", "-e", head_sha])
             .output(),
     )
     .await
-        && out.status.success()
     {
-        let raw = String::from_utf8_lossy(&out.stdout);
-        if let Some(https_url) = rewrite_github_ssh_to_https(&raw) {
-            return https_url;
+        Ok(Ok(o)) => o.status.success(),
+        _ => false,
+    }
+}
+
+struct TempDirCleanup(PathBuf);
+
+impl Drop for TempDirCleanup {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
-    "origin".to_string()
 }
 
 impl EphemeralTreeGuard {
@@ -179,12 +212,30 @@ impl EphemeralTreeGuard {
         pr_number: Option<u64>,
         git_token: Option<&str>,
     ) -> Option<Self> {
-        let repo_root = resolve_repo_root(repo_name)?;
-        Self::prepare_from_root(&repo_root, repo_name, head_sha, pr_number, git_token).await
+        let repo_root = resolve_repo_root(repo_name);
+        Self::prepare_inner(
+            repo_root.as_deref(),
+            repo_name,
+            head_sha,
+            pr_number,
+            git_token,
+        )
+        .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare_from_root(
         repo_root: &Path,
+        repo_name: &str,
+        head_sha: &str,
+        pr_number: Option<u64>,
+        git_token: Option<&str>,
+    ) -> Option<Self> {
+        Self::prepare_inner(Some(repo_root), repo_name, head_sha, pr_number, git_token).await
+    }
+
+    async fn prepare_inner(
+        repo_root: Option<&Path>,
         repo_name: &str,
         head_sha: &str,
         pr_number: Option<u64>,
@@ -202,82 +253,6 @@ impl EphemeralTreeGuard {
             return None;
         }
 
-        // Ensure the commit exists in the local git repository; fetch if absent
-        let has_commit = match tokio::time::timeout(
-            Duration::from_secs(10),
-            isolated_tokio_git(repo_root)
-                .args(["cat-file", "-e", head_sha])
-                .output(),
-        )
-        .await
-        {
-            Ok(Ok(o)) => o.status.success(),
-            _ => false,
-        };
-
-        if !has_commit {
-            let remote = resolve_fetch_remote(repo_root).await;
-            let mut fetch_cmd = isolated_tokio_git(repo_root);
-            fetch_cmd
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("GIT_ASKPASS", "");
-
-            if remote.starts_with("https://github.com/")
-                && let Some(tok) = git_token.map(str::trim).filter(|t| !t.is_empty())
-            {
-                let basic = crate::forges::base64_encode(
-                    format!("x-access-token:{}", tok).as_bytes(),
-                    false,
-                );
-                fetch_cmd
-                    .env(
-                        "REVUE_GIT_AUTH_HEADER",
-                        format!("AUTHORIZATION: basic {}", basic),
-                    )
-                    .arg("--config-env=http.https://github.com/.extraHeader=REVUE_GIT_AUTH_HEADER");
-            }
-
-            if let Some(pr) = pr_number {
-                info!(
-                    "Commit '{}' not found in local repo; fetching pull/{}/head from {}...",
-                    head_sha, pr, remote
-                );
-                let refspec = format!("refs/pull/{}/head", pr);
-                fetch_cmd.args(["fetch", &remote, &refspec]);
-            } else {
-                fetch_cmd.args(["fetch", &remote, head_sha]);
-            }
-
-            fetch_cmd.kill_on_drop(true);
-            match tokio::time::timeout(Duration::from_secs(30), fetch_cmd.output()).await {
-                Ok(Ok(o)) if o.status.success() => {}
-                Ok(Ok(o)) => warn!("git fetch failed with status {}", o.status),
-                Ok(Err(e)) => warn!("git fetch could not run: {}", e),
-                Err(_) => warn!("git fetch timed out after 30s"),
-            }
-        }
-
-        // Verify that head_sha exists locally after fetch
-        let has_commit_after = match tokio::time::timeout(
-            Duration::from_secs(10),
-            isolated_tokio_git(repo_root)
-                .args(["cat-file", "-e", head_sha])
-                .output(),
-        )
-        .await
-        {
-            Ok(Ok(o)) => o.status.success(),
-            _ => false,
-        };
-
-        if !has_commit_after {
-            warn!(
-                "Commit '{}' remains absent in local repo for {}; skipping ephemeral tree",
-                head_sha, repo_name
-            );
-            return None;
-        }
-
         static INVOCATION_COUNTER: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let count = INVOCATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -287,10 +262,130 @@ impl EphemeralTreeGuard {
             .unwrap_or(0);
 
         let temp_base = std::env::temp_dir();
+        let slug = repo_name.rsplit('/').next().unwrap_or("repo");
+        let short_sha = &head_sha[..head_sha.len().min(8)];
+
+        // Prefer an existing read-only local checkout when it already has the commit;
+        // otherwise shallow-fetch into a temporary bare repo under /tmp so read-only
+        // host checkouts are never mutated.
+        let mut _temp_bare_guard: Option<TempDirCleanup> = None;
+        let git_source_dir: PathBuf = match repo_root {
+            Some(root) if has_git_commit(root, head_sha).await => root.to_path_buf(),
+            _ => {
+                let Some(remote_url) = resolve_fetch_remote_url(repo_root, repo_name).await else {
+                    warn!(
+                        "No local commit '{}' and no fetch remote for {}; skipping ephemeral tree",
+                        head_sha, repo_name
+                    );
+                    return None;
+                };
+
+                let bare_dir = temp_base.join(format!(
+                    "revue-bare-{}-{}-{}-{}-{}",
+                    slug,
+                    short_sha,
+                    std::process::id(),
+                    nanos,
+                    count
+                ));
+                let mut bare_builder = std::fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    bare_builder.mode(0o700);
+                }
+                if let Err(e) = bare_builder.create(&bare_dir) {
+                    warn!("Failed to create temporary bare git dir: {}", e);
+                    return None;
+                }
+                _temp_bare_guard = Some(TempDirCleanup(bare_dir.clone()));
+
+                let init_ok = matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        isolated_tokio_git(&bare_dir)
+                            .args(["init", "--bare", "-q"])
+                            .output(),
+                    )
+                    .await,
+                    Ok(Ok(o)) if o.status.success()
+                );
+                if !init_ok {
+                    warn!("git init --bare failed for {}", repo_name);
+                    return None;
+                }
+
+                let mut fetch_cmd = isolated_tokio_git(&bare_dir);
+                fetch_cmd
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .env("GIT_ASKPASS", "");
+
+                if remote_url.starts_with("https://github.com/")
+                    && let Some(tok) = git_token.map(str::trim).filter(|t| !t.is_empty())
+                {
+                    let basic = crate::forges::base64_encode(
+                        format!("x-access-token:{}", tok).as_bytes(),
+                        false,
+                    );
+                    fetch_cmd
+                        .env(
+                            "REVUE_GIT_AUTH_HEADER",
+                            format!("AUTHORIZATION: basic {}", basic),
+                        )
+                        .arg(
+                            "--config-env=http.https://github.com/.extraHeader=REVUE_GIT_AUTH_HEADER",
+                        );
+                }
+
+                if let Some(pr) = pr_number {
+                    info!(
+                        "Commit '{}' not found locally; shallow-fetching pull/{}/head from {}...",
+                        head_sha, pr, remote_url
+                    );
+                    let refspec = format!("refs/pull/{}/head", pr);
+                    fetch_cmd.args(["fetch", "--depth=1", &remote_url, &refspec]);
+                } else {
+                    fetch_cmd.args(["fetch", "--depth=1", &remote_url, head_sha]);
+                }
+
+                fetch_cmd.kill_on_drop(true);
+                match tokio::time::timeout(Duration::from_secs(30), fetch_cmd.output()).await {
+                    Ok(Ok(o)) if o.status.success() => {}
+                    Ok(Ok(o)) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        warn!(
+                            "git fetch failed with status {}: {}",
+                            o.status,
+                            stderr.trim()
+                        );
+                        return None;
+                    }
+                    Ok(Err(e)) => {
+                        warn!("git fetch could not run: {}", e);
+                        return None;
+                    }
+                    Err(_) => {
+                        warn!("git fetch timed out after 30s");
+                        return None;
+                    }
+                }
+
+                if !has_git_commit(&bare_dir, head_sha).await {
+                    warn!(
+                        "Commit '{}' remains absent after shallow fetch for {}; skipping ephemeral tree",
+                        head_sha, repo_name
+                    );
+                    return None;
+                }
+
+                bare_dir
+            }
+        };
+
         let temp_dir = temp_base.join(format!(
             "revue-tree-{}-{}-{}-{}-{}",
-            repo_name.rsplit('/').next().unwrap_or("repo"),
-            &head_sha[..head_sha.len().min(8)],
+            slug,
+            short_sha,
             std::process::id(),
             nanos,
             count
@@ -310,8 +405,8 @@ impl EphemeralTreeGuard {
         // Extract the exact tree at head_sha using an isolated temporary index
         let temp_index = temp_base.join(format!(
             "revue-index-{}-{}-{}-{}-{}.tmp",
-            repo_name.rsplit('/').next().unwrap_or("repo"),
-            &head_sha[..head_sha.len().min(8)],
+            slug,
+            short_sha,
             std::process::id(),
             nanos,
             count
@@ -319,7 +414,7 @@ impl EphemeralTreeGuard {
 
         let extract_pipeline = async {
             // Isolate git from global/system smudge filters and disable symlink creation on checkout.
-            let read_status = isolated_tokio_git(repo_root)
+            let read_status = isolated_tokio_git(&git_source_dir)
                 .env("GIT_INDEX_FILE", &temp_index)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -336,7 +431,7 @@ impl EphemeralTreeGuard {
             }
 
             let prefix_arg = format!("{}/", temp_dir.display());
-            let checkout_status = isolated_tokio_git(repo_root)
+            let checkout_status = isolated_tokio_git(&git_source_dir)
                 .env("GIT_INDEX_FILE", &temp_index)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")

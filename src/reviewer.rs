@@ -13,8 +13,38 @@ use std::process::Command;
 use std::time::Duration;
 use tracing::info;
 
+fn deserialize_summary<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        Str(String),
+        Vec(Vec<String>),
+    }
+
+    match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::Str(s) => Ok(s),
+        StringOrVec::Vec(items) => Ok(items
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if s.starts_with("- ") || s.starts_with("* ") {
+                    s
+                } else {
+                    format!("- {s}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReviewOutput {
+    #[serde(deserialize_with = "deserialize_summary")]
     pub summary: String,
     #[serde(default)]
     pub issues: Vec<ReviewIssue>,
@@ -74,7 +104,9 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
                 if let Ok(gemini) = GeminiProvider::new(config.providers.gemini_model.clone()) {
                     providers.push(Box::new(gemini));
                 } else {
-                    tracing::warn!("Gemini API skipped (no GEMINI_API_KEY / GOOGLE_API_KEY found)");
+                    tracing::debug!(
+                        "Gemini API skipped (no GEMINI_API_KEY / GOOGLE_API_KEY found)"
+                    );
                 }
             }
             "ollama" => {
@@ -1598,6 +1630,25 @@ mod tests {
         let raw = r#"{"summary": "No changes", "issues": []}"#;
         let output = parse_review_response(raw).expect("Should parse raw json");
         assert_eq!(output.summary, "No changes");
+        assert!(output.issues.is_empty());
+    }
+
+    #[test]
+    fn test_parse_review_array_summary() {
+        let raw = r#"```json
+{
+  "summary": [
+    "Switches `revue.env` to GitHub App auth.",
+    "- Adds `pkgs.openssl` to `PATH`."
+  ],
+  "issues": []
+}
+```"#;
+        let output = parse_review_response(raw).expect("Should parse array summary");
+        assert_eq!(
+            output.summary,
+            "- Switches `revue.env` to GitHub App auth.\n- Adds `pkgs.openssl` to `PATH`."
+        );
         assert!(output.issues.is_empty());
     }
 
