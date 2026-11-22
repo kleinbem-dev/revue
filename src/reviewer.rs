@@ -1443,11 +1443,22 @@ pub async fn run_pr_review(
     // Ephemeral checkout at the exact PR head SHA for Semgrep and disk context
     let tree_guard = if !metadata.head_sha.is_empty() {
         let git_token = forge.git_token(repo).await;
+        let fallback_clone_url = if is_forgejo {
+            let base = config.forge.url.trim().trim_end_matches('/');
+            if base.is_empty() {
+                None
+            } else {
+                Some(format!("{}/{}.git", base, repo))
+            }
+        } else {
+            Some(format!("https://github.com/{}.git", repo))
+        };
         crate::tree::EphemeralTreeGuard::prepare(
             repo,
             &metadata.head_sha,
             Some(index),
             git_token.as_deref(),
+            fallback_clone_url.as_deref(),
         )
         .await
     } else {
