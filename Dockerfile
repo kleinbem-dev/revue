@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for Revue (Rust + SvelteKit Dashboard Assets)
-FROM node:24-alpine AS web-builder
+FROM node:26-alpine AS web-builder
 
 WORKDIR /web
 COPY web/package.json web/package-lock.json web/.npmrc ./
