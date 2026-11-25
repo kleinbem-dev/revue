@@ -1,0 +1,12 @@
+{
+  "id": "eval-01-unsanitized-query",
+  "name": "Unsanitized Query Formatting Vulnerability",
+  "description": "SQL query built via format! without parameters, vulnerable to SQL injection",
+  "diff": "diff --git a/src/db.rs b/src/db.rs\n--- a/src/db.rs\n+++ b/src/db.rs\n@@ -25,2 +25,4 @@\n-    let query = \"SELECT * FROM users WHERE id = $1\";\n+    let query = format!(\"SELECT * FROM users WHERE username = '{}'\", user_input);\n+    sqlx::query(&query).fetch_all(pool).await\n",
+  "expected_type": "true_positive",
+  "expected_category": "security",
+  "expected_min_severity": "critical",
+  "expected_file": "src/db.rs",
+  "detective_response": "- In `src/db.rs`: Query is constructed via `format!` string interpolation with `user_input` instead of parameter binding. This creates a severe SQL injection vulnerability.",
+  "judge_response": "```json\n{\n  \"summary\": \"Fix critical SQL injection vulnerability in user query formatting\",\n  \"issues\": [\n    {\n      \"file\": \"src/db.rs\",\n      \"line\": 26,\n      \"severity\": \"critical\",\n      \"title\": \"SQL Injection via format! interpolation\",\n      \"comment\": \"Constructing SQL queries using `format!` allows arbitrary SQL injection. Use parameterized queries with `$1` or query parameters.\",\n      \"confidence\": 10,\n      \"suggestion\": \"sqlx::query(\\\"SELECT * FROM users WHERE username = $1\\\").bind(user_input).fetch_all(pool).await\"\n    }\n  ]\n}\n```"
+}
