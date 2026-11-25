@@ -40,13 +40,27 @@ pub struct EmptyDir(PathBuf);
 
 impl EmptyDir {
     pub fn new(prefix: &str) -> Result<Self> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path =
-            std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nanos));
-        std::fs::create_dir(&path)
+        let path = std::env::temp_dir().join(format!(
+            "{}-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            nanos,
+            seq
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&path)
             .map_err(|e| anyhow!("Failed to create {}: {}", path.display(), e))?;
         Ok(Self(path))
     }

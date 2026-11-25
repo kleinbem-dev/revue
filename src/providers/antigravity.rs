@@ -40,8 +40,12 @@ impl Provider for AntigravityCliProvider {
             ));
         }
         let effort = std::env::var("REVUE_GEMINI_EFFORT").unwrap_or_else(|_| "low".to_string());
-        let mut cmd = Command::new(&self.bin_path);
-        cmd.arg("--sandbox")
+        // Run inside an empty temp directory so untrusted repo rules (GEMINI.md, .agents/) are never loaded.
+        let program = cli::resolve_program(&self.bin_path);
+        let cwd = cli::EmptyDir::new("revue-antigravity")?;
+        let mut cmd = Command::new(&program);
+        cmd.current_dir(cwd.path())
+            .arg("--sandbox")
             .arg("--disable-slash-commands")
             .arg("--effort")
             .arg(&effort)
@@ -81,5 +85,29 @@ mod tests {
         let prompt = "x".repeat(cli::MAX_ARG_BYTES + 1);
         let err = provider.complete(&prompt).await.unwrap_err().to_string();
         assert!(err.contains("argument limit"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runs_in_isolated_empty_working_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = cli::EmptyDir::new("revue-antigravity-test").unwrap();
+        let fake_bin = dir.path().join("fake-antigravity.sh");
+        std::fs::write(&fake_bin, "#!/bin/sh\npwd\nls -A | wc -l\n").unwrap();
+        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let provider = AntigravityCliProvider {
+            bin_path: fake_bin.to_string_lossy().to_string(),
+        };
+        let out = provider.complete("review this").await.unwrap();
+        let mut lines = out.lines();
+        let ran_in = lines.next().unwrap_or("");
+        let file_count = lines.next().unwrap_or("").trim();
+        assert!(
+            ran_in.contains("revue-antigravity-"),
+            "unexpected cwd: {ran_in}"
+        );
+        assert_eq!(file_count, "0", "working directory must be empty");
     }
 }
