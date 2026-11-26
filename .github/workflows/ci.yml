@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: kleinbem/actions/.github/workflows/zizmor.yaml@8d97c5a48bf3966994d5747c07f096938b8ecea5 # v1.8.0
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint workflows
+        uses: kleinbem/actions/actionlint@8d97c5a48bf3966994d5747c07f096938b8ecea5 # v1.8.0
+      - uses: kleinbem/actions/nix-setup@8d97c5a48bf3966994d5747c07f096938b8ecea5 # v1.8.0
+      - name: Flake check
+        run: nix flake check
+      # flake check doesn't build packages; this is what catches a bad npm bump.
+      - name: Build web
+        run: nix build .#web
+      - name: Check unused dependencies
+        run: nix shell nixpkgs#cargo-machete --command cargo-machete
+      - name: Clippy
+        run: nix develop --command cargo clippy --all-targets -- -D warnings
+      - name: Svelte check
+        run: |
+          cd web
+          nix develop .. --command npm ci
+          nix develop .. --command npm test
+          nix develop .. --command npm run check
+      - name: Unit tests
+        run: nix develop --command cargo test --all-targets

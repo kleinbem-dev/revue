@@ -1,0 +1,5 @@
+# WORKAROUND(@sveltejs/vite-plugin-svelte): transitive `deepmerge` has no fixed release yet (upstream: TehShrike/deepmerge#285); dev-only build dependency that merges trusted Vite config — remove when `@sveltejs/vite-plugin-svelte` drops or updates `deepmerge`.
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2027-02-03
+reason = "No fixed deepmerge release (upstream: TehShrike/deepmerge#285); dev-only via @sveltejs/vite-plugin-svelte, merges trusted build config"

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="dark light" />
+		<!-- web-config:init (written by `web-config sync`, do not edit) -->
+		<script>try{const p=localStorage.getItem("fleet-theme");const m=window.matchMedia('(prefers-color-scheme: dark)').matches;const t=p==='dark'||p==='light'?p:(m?'dark':'light');document.documentElement.dataset.theme=t;document.documentElement.classList.toggle('dark',t==='dark');document.documentElement.classList.toggle('light',t==='light');}catch(e){}try{const s=localStorage.getItem("fleet-font-size");if(s==='large'||s==='larger'){document.documentElement.dataset.fontSize=s;document.documentElement.classList.add('font-size-'+s);}}catch(e){}</script>
+		<!-- /web-config:init -->
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>
