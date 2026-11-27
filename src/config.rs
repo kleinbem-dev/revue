@@ -105,6 +105,14 @@ pub struct ProvidersConfig {
     pub mesh_llm_url: String,
     #[serde(default = "default_mesh_llm_model")]
     pub mesh_llm_model: String,
+    /// When true, POST to `<mesh_llm_url>/unload` (or `vram_handoff_unload_url`) after
+    /// completing a review via Mesh-LLM so LayerStream / Mesh-LLM immediately reclaims VRAM.
+    #[serde(default = "default_mesh_llm_unload_after_review")]
+    pub mesh_llm_unload_after_review: bool,
+    /// Optional explicit unload webhook URL (e.g. `http://127.0.0.1:8080/v1/unload`)
+    /// invoked after a Mesh-LLM review completes. Overrides the derived `/v1/unload` URL.
+    #[serde(default = "default_vram_handoff_unload_url")]
+    pub vram_handoff_unload_url: Option<String>,
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
     #[serde(default = "default_ollama_model")]
@@ -135,6 +143,19 @@ fn default_mesh_llm_model() -> String {
     std::env::var("MESH_LLM_MODEL").unwrap_or_else(|_| "Qwen3-4B-Q4_K_M".to_string())
 }
 
+fn default_mesh_llm_unload_after_review() -> bool {
+    std::env::var("MESH_LLM_UNLOAD_AFTER_REVIEW")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn default_vram_handoff_unload_url() -> Option<String> {
+    std::env::var("REVUE_VRAM_UNLOAD_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn default_ollama_url() -> String {
     std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string())
 }
@@ -161,6 +182,8 @@ impl Default for ProvidersConfig {
             cascade: default_cascade(),
             mesh_llm_url: default_mesh_llm_url(),
             mesh_llm_model: default_mesh_llm_model(),
+            mesh_llm_unload_after_review: default_mesh_llm_unload_after_review(),
+            vram_handoff_unload_url: default_vram_handoff_unload_url(),
             ollama_url: default_ollama_url(),
             ollama_model: default_ollama_model(),
             gemini_model: default_gemini_model(),

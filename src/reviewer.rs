@@ -92,10 +92,22 @@ pub fn build_provider_chain(config: &RevueConfig) -> ProviderChain {
                 providers.push(Box::new(AntigravityCliProvider::new()));
             }
             "mesh-llm" | "mesh" => {
-                providers.push(Box::new(OpenAiCompatProvider::mesh_llm(
-                    config.providers.mesh_llm_url.clone(),
-                    config.providers.mesh_llm_model.clone(),
-                )));
+                let unload_url = config
+                    .providers
+                    .vram_handoff_unload_url
+                    .clone()
+                    .or_else(|| {
+                        config.providers.mesh_llm_unload_after_review.then(|| {
+                            OpenAiCompatProvider::derive_unload_url(&config.providers.mesh_llm_url)
+                        })
+                    });
+                providers.push(Box::new(
+                    OpenAiCompatProvider::mesh_llm(
+                        config.providers.mesh_llm_url.clone(),
+                        config.providers.mesh_llm_model.clone(),
+                    )
+                    .with_unload_url(unload_url),
+                ));
             }
             "claude" | "claude-cli" => {
                 providers.push(Box::new(ClaudeCliProvider::new()));
@@ -976,6 +988,32 @@ fn filter_issues(issues: &mut Vec<ReviewIssue>, config: &RevueConfig) {
 /// Executes the multi-pass review pipeline against the given parsed diff.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_review_pipeline(
+    diff: &ParsedDiff,
+    config: &RevueConfig,
+    chain: &ProviderChain,
+    false_positives: &[crate::db::FindingFeedback],
+    repo_path: Option<&std::path::Path>,
+    trusted_rules_root: Option<&std::path::Path>,
+    intent: Option<&PrMetadata>,
+    existing_comments: &[crate::forges::DiscussionComment],
+) -> Result<ReviewExecutionResult> {
+    let result = execute_review_pipeline_inner(
+        diff,
+        config,
+        chain,
+        false_positives,
+        repo_path,
+        trusted_rules_root,
+        intent,
+        existing_comments,
+    )
+    .await;
+    chain.release_vram().await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_review_pipeline_inner(
     diff: &ParsedDiff,
     config: &RevueConfig,
     chain: &ProviderChain,
