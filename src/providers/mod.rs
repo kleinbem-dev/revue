@@ -15,6 +15,10 @@ pub trait Provider: Send + Sync {
 
     /// Execute a review prompt and return the raw LLM text response
     async fn complete(&self, prompt: &str) -> Result<String>;
+
+    /// Optional best-effort post-review VRAM handoff hook (e.g. `POST /v1/unload`
+    /// on Mesh-LLM / LayerStream so GPU memory is immediately reclaimed for other workloads).
+    async fn release_vram(&self) {}
 }
 
 pub struct ProviderChain {
@@ -79,6 +83,14 @@ impl ProviderChain {
             "All providers in the fallback chain failed:\n{}",
             errors.join("\n")
         ))
+    }
+
+    /// Invokes best-effort VRAM handoff hooks on every provider in the chain.
+    /// Providers that were not called (or have no unload hook configured) are no-ops.
+    pub async fn release_vram(&self) {
+        for provider in &self.providers {
+            provider.release_vram().await;
+        }
     }
 }
 
